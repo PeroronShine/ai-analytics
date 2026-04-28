@@ -92,7 +92,7 @@ if uploaded_file is not None and api_key:
 {user_request}
 
 ДАТАСЕТ:
-{data_info}
+{df}
 
 ИНСТРУКЦИИ:
 1. Если пользователь задал конкретный вопрос — ответь именно на него.
