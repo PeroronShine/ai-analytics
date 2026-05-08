@@ -170,7 +170,7 @@ if st.button("🚀 Запустить анализ агента", type="primary"
                     
                     # Показ результатов
                     if 'plot' in result and result['plot']:
-                        st.plotly_chart(result['plot'], use_container_width=True)
+                        st.plotly_chart(result['plot'], width="stretch")
                     
                     if 'output' in result and result['output']:
                         st.markdown("### 📝 Результаты:")
