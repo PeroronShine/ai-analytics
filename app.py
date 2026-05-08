@@ -12,7 +12,7 @@ import ast
 from contextlib import redirect_stdout, redirect_stderr
 import time
 
-# OpenAI-compatible client для DeepSeek
+# DashScope client для Qwen
 from openai import OpenAI
 
 # Отключаем предупреждения SSL для локальной разработки
@@ -53,7 +53,7 @@ class SafeCodeExecutor:
             'statistics': __import__('statistics'), 'collections': __import__('collections'),
         }
 
-        # Безопасная обработка __builtins__ (может быть dict или module)
+        # Безопасная обработка __builtins__
         builtins_dict = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__
         safe_builtins = {k: v for k, v in builtins_dict.items() if k not in FORBIDDEN_BUILTINS}
 
@@ -143,12 +143,12 @@ class SafeCodeExecutor:
         return result
 
 
-class DeepSeekAnalyticsAgent:
-    """Аналитический агент на базе DeepSeek V4 с code interpreter"""
-    def __init__(self, api_key: str, model: str = "deepseek-chat"):
+class QwenAnalyticsAgent:
+    """Аналитический агент на базе Qwen3.6-Plus с code interpreter"""
+    def __init__(self, api_key: str, model: str = "qwen3.6-plus"):
         self.client = OpenAI(
             api_key=api_key,
-            base_url="https://api.deepseek.com"
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         self.model = model
         self.df_info = None
@@ -194,7 +194,7 @@ class DeepSeekAnalyticsAgent:
 ПРИМЕР ОТВЕТА:
 {
 "thought": "Нужно рассчитать среднюю зарплату по отделам и построить бар-чарт",
-"code": "result = df.groupby('department')['salary'].mean().round(2)\\nprint('Средняя зарплата по отделам:')\\nprint(result)\\nfig = px.bar(x=result.index, y=result.values, labels={'x':'Отдел','y':'Средняя зарплата'}, title='Зарплата по отделам')\\nsave_fig(fig, 'salary_by_dept')",
+"code": "result = df.groupby('department')['salary'].mean().round(2)\nprint('Средняя зарплата по отделам:')\nprint(result)\nfig = px.bar(x=result.index, y=result.values, labels={'x':'Отдел','y':'Средняя зарплата'}, title='Зарплата по отделам')\nsave_fig(fig, 'salary_by_dept')",
 "explanation": "Код группирует данные по отделам, считает среднюю зарплату и строит интерактивный график"
 }
 ВАЖНО: Отвечай ТОЛЬКО валидным JSON, без markdown-обёрток."""
@@ -282,7 +282,7 @@ def check_prompt_safety(query: str) -> tuple:
 
 # ================= STREAMLIT UI =================
 st.set_page_config(
-    page_title="AI Analytics Agent",
+    page_title="🤖 AI Analytics Agent",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -299,16 +299,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🤖 AI Analytics Agent")
-st.markdown("Агент на DeepSeek V4 с Code Interpreter для анализа данных")
+st.markdown("Агент на Qwen3.6-Plus с Code Interpreter для анализа данных")
 
 # Sidebar с настройками
 with st.sidebar:
     st.header("⚙️ Настройки")
     api_key = st.text_input(
-        "🔑 DeepSeek API Key",
+        "🔑 DashScope API Key",
         type="password",
         placeholder="sk-...",
-        help="Получите ключ на platform.deepseek.com"
+        help="Получите ключ на dashscope.console.aliyun.com"
     )
 
     if api_key:
@@ -317,8 +317,9 @@ with st.sidebar:
     st.markdown("---")
 
     model_options = {
-        "deepseek-chat": "DeepSeek V3/V4 (баланс)",
-        "deepseek-reasoner": "DeepSeek Reasoner (сложные задачи)",
+        "qwen3.6-plus": "Qwen3.6-Plus (рекомендуемая)",
+        "qwen3.5-plus": "Qwen3.5-Plus",
+        "qwen2.5-plus": "Qwen2.5-Plus",
     }
     selected_model = st.selectbox(
         "🧠 Модель",
@@ -372,7 +373,7 @@ if uploaded_file is not None:
 
         if st.button("🚀 Запустить анализ агента", type="primary", disabled=not (api_key and user_query)):
             if not api_key:
-                st.error("❌ Введите API ключ DeepSeek")
+                st.error("❌ Введите API ключ DashScope (Alibaba Cloud)")
                 st.stop()
 
             if not user_query.strip():
@@ -384,9 +385,9 @@ if uploaded_file is not None:
                 st.warning(safety_msg)
                 st.stop()
 
-            with st.spinner("Агент генерирует план анализа..."):
+            with st.spinner("🤖 Агент генерирует план анализа..."):
                 try:
-                    agent = DeepSeekAnalyticsAgent(api_key=api_key, model=selected_model)
+                    agent = QwenAnalyticsAgent(api_key=api_key, model=selected_model)
                     result = agent.run_analysis(user_query, df)
 
                     st.markdown("---")
@@ -445,7 +446,7 @@ else:
 
     with col2:
         st.markdown("### 🧠 Интеллект")
-        st.markdown("- DeepSeek V4 для генерации кода")
+        st.markdown("- Qwen3.6-Plus для генерации кода")
         st.markdown("- Автоматическое планирование анализа")
         st.markdown("- Адаптация под структуру данных")
 
@@ -459,7 +460,7 @@ else:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray; font-size: 0.9em'>"
-    "🤖 AI Analytics Agent | DeepSeek V4 + Code Interpreter | Sandbox Execution"
+    "🤖 AI Analytics Agent | Qwen3.6-Plus + Code Interpreter | Sandbox Execution"
     "</div>",
     unsafe_allow_html=True
 )
