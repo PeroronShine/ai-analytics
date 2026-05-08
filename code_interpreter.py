@@ -1,185 +1,196 @@
-import os
+from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole
+import requests
 import base64
+from typing import List, Dict, Optional
 import json
-import time
-from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
 
-try:
-    from e2b_code_interpreter import Sandbox
-    E2B_AVAILABLE = True
-except ImportError:
-    E2B_AVAILABLE = False
-    Sandbox = Any  # fallback для type hints
+def get_gigachat_token(client_id: str, client_secret: str) -> str:
+    """Получение OAuth токена для GigaChat API"""
+    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        'RqUID': '24b19549-7981-44b5-b331-b856fad131c6',
+        'Authorization': f'Basic {base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()}'
+    }
+    
+    data = {
+        'scope': 'GIGACHAT_API_PERS'
+    }
+    
+    response = requests.post(url, headers=headers, data=data)
+    response.raise_for_status()
+    
+    return response.json()['access_token']
 
-@dataclass
-class ExecutionResult:
-    success: bool
-    stdout: str
-    stderr: str
-    results: List[Any]
-    error: Optional[str] = None
-    artifacts: Optional[Dict[str, bytes]] = None
-    execution_time: float = 0.0
+class GigaChatAgent:
+    """Агент для аналитики данных с использованием GigaChat"""
+    
+    def __init__(self, token: str = None, api_key: str = None):
+        self.client = GigaChat(
+            credentials=token or api_key,
+            verify_ssl_certs=False
+        )
+        self.tools = self._define_tools()
+    
+    def _define_tools(self) -> List[Dict]:
+        """Определение доступных инструментов (tools)"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_python_code",
+                    "description": "Выполняет Python код для анализа данных pandas DataFrame",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "Python код для выполнения. Должен использовать pandas DataFrame 'df'"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Описание того, что делает код"
+                            }
+                        },
+                        "required": ["code", "description"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_visualization",
+                    "description": "Создает визуализацию с помощью plotly",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chart_type": {
+                                "type": "string",
+                                "enum": ["line", "bar", "scatter", "histogram", "box", "heatmap"],
+                                "description": "Тип графика"
+                            },
+                            "x_column": {
+                                "type": "string",
+                                "description": "Колонка для оси X"
+                            },
+                            "y_column": {
+                                "type": "string",
+                                "description": "Колонка для оси Y"
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Заголовок графика"
+                            }
+                        },
+                        "required": ["chart_type", "title"]
+                    }
+                }
+            }
+        ]
+    
+    def generate_analysis_code(
+        self, 
+        query: str, 
+        dataframe, 
+        chat_history: List[Dict] = None
+    ) -> Dict:
+        """Генерация кода для анализа данных"""
+        
+        # Получение информации о DataFrame
+        df_info = {
+            'columns': list(dataframe.columns),
+            'dtypes': {col: str(dtype) for col, dtype in dataframe.dtypes.items()},
+            'shape': dataframe.shape,
+            'sample': dataframe.head(3).to_dict()
+        }
+        
+        # Системный промпт
+        system_prompt = """Ты — AI аналитик данных. Твоя задача:
+1. Анализировать данные pandas DataFrame
+2. Писать безопасный и эффективный Python код
+3. Создавать визуализации с помощью plotly
+4. Предоставлять статистические выводы
 
-class CodeInterpreter:
-    def __init__(self, api_key: Optional[str] = None, timeout: int = 60):
-        self.api_key = api_key or os.getenv("E2B_API_KEY")
-        self.timeout = timeout
-        self.sandbox = None
-        self._local_fallback = not (E2B_AVAILABLE and self.api_key)
+Правила:
+- Используй только pandas, numpy, plotly
+- DataFrame доступен как переменная 'df'
+- Всегда возвращай код в переменной 'code'
+- Добавляй пояснения в переменную 'explanation'
+- Для графиков используй plotly.express
+- Обрабатывай возможные ошибки (пропуски, типы данных)"""
 
-        if not self._local_fallback:
-            try:
-                self.sandbox = Sandbox.create(
-                    api_key=self.api_key,
-                    timeout=self.timeout
-                )
-            except Exception as e:
-                print(f"E2B init failed: {e}. Using local fallback.")
-                self._local_fallback = True
+        # Формирование пользовательского запроса
+        user_prompt = f"""
+Запрос пользователя: {query}
 
-    def upload_file(self, file_path: str, remote_name: Optional[str] = None) -> str:
-        if self._local_fallback:
-            return file_path
+Информация о датасете:
+- Столбцы: {df_info['columns']}
+- Типы данных: {df_info['dtypes']}
+- Размер: {df_info['shape']}
 
-        remote_name = remote_name or os.path.basename(file_path)
-        with open(file_path, "rb") as f:
-            self.sandbox.files.write(f"/home/user/{remote_name}", f.read())
-        return f"/home/user/{remote_name}"
+Напиши Python код для выполнения этого запроса.
+Код должен:
+1. Быть безопасным и эффективным
+2. Использовать pandas для анализа
+3. При необходимости создавать визуализации plotly
+4. Выводить результаты через print()
 
-    def execute(self, code: str, context: Optional[Dict[str, Any]] = None) -> ExecutionResult:
-        if self._local_fallback:
-            return self._execute_local(code, context)
-        return self._execute_e2b(code, context)
+Верни ответ в формате JSON:
+{{
+    "code": "python код здесь",
+    "explanation": "описание что делает код"
+}}"""
 
-    def _execute_e2b(self, code: str, context: Optional[Dict[str, Any]] = None) -> ExecutionResult:
-        start_time = time.time()
+        # Формирование сообщений
+        messages = [
+            Messages(role=MessagesRole.SYSTEM, content=system_prompt),
+            Messages(role=MessagesRole.USER, content=user_prompt)
+        ]
 
+        # Добавление истории чата
+        if chat_history:
+            for item in chat_history[-3:]:  # Последние 3 запроса
+                messages.append(Messages(role=MessagesRole.USER, content=item['query']))
+        
         try:
-            if context:
-                context_code = self._build_context_code(context)
-                code = context_code + "\n\n" + code
-
-            execution = self.sandbox.run_code(code, timeout=self.timeout)
-
-            artifacts = {}
-            for result in execution.results:
-                if hasattr(result, 'png') and result.png:
-                    artifacts['plot.png'] = base64.b64decode(result.png)
-                if hasattr(result, 'jpg') and result.jpg:
-                    artifacts['plot.jpg'] = base64.b64decode(result.jpg)
-
-            exec_time = time.time() - start_time
-
-            return ExecutionResult(
-                success=True,
-                stdout=execution.logs.stdout,
-                stderr=execution.logs.stderr,
-                results=[r.text for r in execution.results if hasattr(r, 'text')],
-                artifacts=artifacts if artifacts else None,
-                execution_time=exec_time
+            # Запрос к GigaChat с tool calling
+            response = self.client.chat(
+                messages=messages,
+                tools=self.tools,
+                tool_choice="auto",
+                temperature=0.1,  # Низкая температура для точности кода
+                max_tokens=2000
             )
-
+            
+            # Обработка ответа
+            assistant_message = response.choices[0].message
+            
+            # Если модель вызвала tool
+            if assistant_message.tool_calls:
+                tool_call = assistant_message.tool_calls[0]
+                if tool_call.function.name == "execute_python_code":
+                    args = json.loads(tool_call.function.arguments)
+                    return {
+                        'code': args['code'],
+                        'explanation': args.get('description', '')
+                    }
+            
+            # Если модель вернула обычный текст с кодом
+            content = assistant_message.content
+            if '```python' in content:
+                code = content.split('```python')[1].split('```')[0].strip()
+            elif '```' in content:
+                code = content.split('```')[1].split('```')[0].strip()
+            else:
+                code = content
+            
+            return {
+                'code': code,
+                'explanation': 'Код сгенерирован агентом'
+            }
+            
         except Exception as e:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr="",
-                results=[],
-                error=str(e),
-                execution_time=time.time() - start_time
-            )
-
-    def _execute_local(self, code: str, context: Optional[Dict[str, Any]] = None) -> ExecutionResult:
-        import subprocess
-        import tempfile
-
-        start_time = time.time()
-
-        if context:
-            context_code = self._build_context_code(context)
-            full_code = context_code + "\n\n" + code
-        else:
-            full_code = code
-
-        restricted_code = self._sanitize_code(full_code)
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(restricted_code)
-            temp_file = f.name
-
-        try:
-            result = subprocess.run(
-                ['python', temp_file],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout
-            )
-
-            exec_time = time.time() - start_time
-
-            return ExecutionResult(
-                success=result.returncode == 0,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                results=[],
-                error=result.stderr if result.returncode != 0 else None,
-                execution_time=exec_time
-            )
-
-        except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr="",
-                results=[],
-                error=f"Execution timeout after {self.timeout}s",
-                execution_time=self.timeout
-            )
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr="",
-                results=[],
-                error=str(e),
-                execution_time=time.time() - start_time
-            )
-        finally:
-            try:
-                os.unlink(temp_file)
-            except:
-                pass
-
-    def _build_context_code(self, context: Dict[str, Any]) -> str:
-        lines = ["# Auto-generated context"]
-
-        if 'file_path' in context:
-            lines.append("import pandas as pd")
-            lines.append(f"df = pd.read_csv('{context['file_path']}')")
-            lines.append("print(f'Dataset loaded: {len(df)} rows, {len(df.columns)} columns')")
-            lines.append("print(f'Columns: {list(df.columns)}')")
-
-        if 'df_info' in context:
-            lines.append(f"# Dataset info: {context['df_info']}")
-
-        return "\n".join(lines)
-
-    def _sanitize_code(self, code: str) -> str:
-        dangerous = ['os.system', 'subprocess', 'eval(', 'exec(', '__import__', "open('/"]
-        for d in dangerous:
-            if d in code:
-                code = code.replace(d, f"# BLOCKED: {d}")
-        return code
-
-    def close(self):
-        if self.sandbox:
-            self.sandbox.kill()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        return False
+            raise Exception(f"Ошибка при обращении к GigaChat: {str(e)}")
