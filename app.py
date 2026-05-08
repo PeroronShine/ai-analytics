@@ -1,11 +1,17 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from llm_client import GigaChatAgent
 from code_interpreter import CodeInterpreter
 from prompt_security import PromptSecurity
 from analytics_core import AnalyticsEngine
 import os
 from datetime import datetime
+import warnings
+import traceback
+
+warnings.filterwarnings('ignore')
 
 # Конфигурация страницы
 st.set_page_config(
@@ -60,14 +66,18 @@ with st.sidebar:
                 st.session_state.api_authorized = True
                 st.success("✅ Авторизация успешна!")
             except Exception as e:
-                st.error(f"❌ Ошибка: {e}")
+                st.error(f"❌ Ошибка: {str(e)}")
+                st.code(traceback.format_exc())
     
     else:
         api_key = st.text_input("API Key", type="password")
         if api_key:
-            st.session_state.agent = GigaChatAgent(api_key=api_key)
-            st.session_state.api_authorized = True
-            st.success("✅ API ключ принят")
+            try:
+                st.session_state.agent = GigaChatAgent(api_key=api_key)
+                st.session_state.api_authorized = True
+                st.success("✅ API ключ принят")
+            except Exception as e:
+                st.error(f"❌ Ошибка: {str(e)}")
     
     st.divider()
     
@@ -94,7 +104,7 @@ with st.sidebar:
             st.info(f"📊 Столбцов: {len(st.session_state.df.columns)}")
             
         except Exception as e:
-            st.error(f"❌ Ошибка загрузки: {e}")
+            st.error(f"❌ Ошибка загрузки: {str(e)}")
 
 # Основной контент
 st.title("🤖 AI Analytics Agent")
@@ -110,14 +120,14 @@ if st.session_state.df is None:
 
 # Показ превью данных
 with st.expander("👁️ Превью данных", expanded=False):
-    st.dataframe(st.session_state.df.head(10))
+    st.dataframe(st.session_state.df.head(10), width="stretch")
     
     # Статистика
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Строк", f"{len(st.session_state.df):,}")
     col2.metric("Столбцов", len(st.session_state.df.columns))
     col3.metric("Числовых", len(st.session_state.df.select_dtypes(include='number').columns))
-    col4.metric("Пропусков", st.session_state.df.isnull().sum().sum())
+    col4.metric("Пропусков", int(st.session_state.df.isnull().sum().sum()))
 
 # Зона чата
 st.subheader("💬 Запрос к агенту")
@@ -161,15 +171,22 @@ if st.button("🚀 Запустить анализ агента", type="primary"
                     chat_history=st.session_state.chat_history
                 )
                 
+                st.info("📝 Сгенерированный код:")
+                st.code(code_response.get('code', ''), language='python')
+                
                 # Выполнение кода
-                result = interpreter.execute(code_response['code'], timeout=30)
+                result = interpreter.execute_with_dataframe(
+                    code_response.get('code', ''),
+                    st.session_state.df,
+                    timeout=30
+                )
                 
                 # Обработка результатов
-                if result['success']:
+                if result.get('success'):
                     st.success("✅ Анализ завершен успешно!")
                     
                     # Показ результатов
-                    if 'plot' in result and result['plot']:
+                    if 'plot' in result and result['plot'] is not None:
                         st.plotly_chart(result['plot'], width="stretch")
                     
                     if 'output' in result and result['output']:
@@ -177,21 +194,22 @@ if st.button("🚀 Запустить анализ агента", type="primary"
                         st.markdown(result['output'])
                     
                     if 'data' in result and result['data'] is not None:
-                        st.dataframe(result['data'])
+                        st.dataframe(result['data'], width="stretch")
                     
                     # Добавление в историю
                     st.session_state.chat_history.append({
                         'query': query,
-                        'code': code_response['code'],
+                        'code': code_response.get('code', ''),
                         'timestamp': datetime.now()
                     })
                     
                 else:
-                    st.error(f"❌ Ошибка выполнения: {result['error']}")
-                    st.code(code_response['code'], language='python')
+                    st.error(f"❌ Ошибка выполнения: {result.get('error', 'Неизвестная ошибка')}")
+                    st.code(code_response.get('code', ''), language='python')
                     
             except Exception as e:
                 st.error(f"❌ Критическая ошибка: {str(e)}")
+                st.code(traceback.format_exc(), language='python')
 
 # История запросов
 if st.session_state.chat_history:
