@@ -1,21 +1,21 @@
 # Core
-streamlit>=1.28.0
-pandas>=2.0.0
-numpy>=1.24.0
+streamlit==1.31.0
+pandas==2.2.1
+numpy==1.26.4
 
 # AI/LLM
-openai>=1.12.0
+openai==1.12.0
 
 # Visualization
-plotly>=5.18.0
+plotly==5.19.0
 
 # Excel support
-xlsxwriter>=3.1.0
-openpyxl>=3.1.0
+xlsxwriter==3.1.9
+openpyxl==3.1.2
 
 # HTTP requests
-requests>=2.31.0
-httpx>=0.25.0
+requests==2.31.0
+httpx==0.26.0
 
 # Security
-urllib3>=2.0.0
+urllib3==2.1.0
