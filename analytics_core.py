@@ -30,7 +30,7 @@ class AnalyticsEngine:
             'info': {
                 'total_rows': len(self.df),
                 'total_columns': len(self.df.columns),
-                'memory_usage': self.df.memory_usage(deep=True).sum() / 1024 ** 2,  # MB
+                'memory_usage': self.df.memory_usage(deep=True).sum() / 1024 ** 2,
                 'missing_total': self.df.isnull().sum().sum()
             }
         }
@@ -43,19 +43,7 @@ class AnalyticsEngine:
         title: str = None,
         **kwargs
     ) -> Optional[go.Figure]:
-        """
-        Создание визуализации
-        
-        Args:
-            chart_type: Тип графика
-            x: Колонка для оси X
-            y: Колонка для оси Y
-            title: Заголовок
-            **kwargs: Дополнительные параметры
-        
-        Returns:
-            Plotly Figure
-        """
+        """Создание визуализации"""
         try:
             if chart_type == 'histogram':
                 fig = px.histogram(self.df, x=x or self.metadata['numeric_columns'][0], 
@@ -81,7 +69,6 @@ class AnalyticsEngine:
             else:
                 return None
             
-            # Настройка темы
             fig.update_layout(
                 template='plotly_dark',
                 height=500
@@ -99,16 +86,7 @@ class AnalyticsEngine:
         return numeric_df.corr()
     
     def group_statistics(self, group_by: str, agg_columns: list = None) -> pd.DataFrame:
-        """
-        Группировка и агрегация данных
-        
-        Args:
-            group_by: Колонка для группировки
-            agg_columns: Колонки для агрегации
-        
-        Returns:
-            DataFrame с результатами
-        """
+        """Группировка и агрегация данных"""
         if agg_columns is None:
             agg_columns = self.metadata['numeric_columns']
         
