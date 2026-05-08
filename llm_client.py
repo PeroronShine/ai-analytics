@@ -1,15 +1,22 @@
 import os
 import json
 import time
+import re
 from typing import List, Dict, Any, Optional, Callable, Generator
 from dataclasses import dataclass, field
 
 try:
     from gigachat import GigaChat
+    from gigachat.models import Chat, Messages, MessagesRole, Function, FunctionParameters
     GIGA_AVAILABLE = True
 except ImportError:
     GIGA_AVAILABLE = False
-    GigaChat = Any  # fallback для type hints
+    GigaChat = object
+    Chat = object
+    Messages = object
+    MessagesRole = object
+    Function = object
+    FunctionParameters = object
 
 @dataclass
 class ToolCall:
@@ -45,6 +52,7 @@ class GigaChatAgent:
         self.conversation_history: List[Dict[str, Any]] = []
         self.tools: List[Dict[str, Any]] = []
         self.tool_registry: Dict[str, Callable] = {}
+        self._use_native_functions = True  # Пробуем native function calling
 
         if not GIGA_AVAILABLE:
             raise ImportError("gigachat package not installed. Run: pip install gigachat")
@@ -89,6 +97,9 @@ class GigaChatAgent:
         base_prompt = """Ты — AI Analytics Agent, эксперт по анализу данных. 
 Твоя задача — проводить глубокий анализ предоставленных данных и генерировать Python-код для вычислений и визуализации.
 
+У тебя есть инструмент execute_python для выполнения Python-кода.
+Когда тебе нужно выполнить код — используй этот инструмент.
+
 ПРАВИЛА:
 1. ВСЕГДА используй инструмент execute_python для выполнения кода анализа
 2. НЕ делай предположения — проверяй факты через код
@@ -96,6 +107,10 @@ class GigaChatAgent:
 4. Возвращай структурированный отчёт с выводами на основе РЕАЛЬНЫХ результатов выполнения кода
 5. Если данные неоднозначны — укажи это явно
 6. Используй pandas для обработки данных, scipy/statsmodels для статистики
+
+ФОРМАТ ВЫЗОВА ИНСТРУМЕНТА:
+Для вызова execute_python используй формат:
+<function=execute_python>{{"code": "твой python код здесь"}}</function>
 
 ФОРМАТ ОТВЕТА:
 - Начни с краткого плана анализа
@@ -111,6 +126,71 @@ class GigaChatAgent:
 
         from datetime import datetime
         return base_prompt.format(date=datetime.now().strftime("%Y-%m-%d"))
+
+    def _parse_tool_calls(self, content: str) -> List[ToolCall]:
+        """Парсит теги <function=...> из текста модели."""
+        tool_calls = []
+        # Паттерн: <function=name>{"key": "value"}</function>
+        pattern = r'<function=(\w+)>(.*?)</function>'
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        for name, args_str in matches:
+            try:
+                args = json.loads(args_str)
+                tool_calls.append(ToolCall(name=name, arguments=args, call_id=f"tc_{len(tool_calls)}"))
+            except json.JSONDecodeError:
+                # Пробуем найти JSON внутри строки
+                try:
+                    json_match = re.search(r'\{.*\}', args_str, re.DOTALL)
+                    if json_match:
+                        args = json.loads(json_match.group())
+                        tool_calls.append(ToolCall(name=name, arguments=args, call_id=f"tc_{len(tool_calls)}"))
+                except:
+                    pass
+
+        return tool_calls
+
+    def _remove_tool_calls_from_content(self, content: str) -> str:
+        """Удаляет теги <function=...> из текста."""
+        return re.sub(r'<function=\w+>.*?</function>', '', content, flags=re.DOTALL).strip()
+
+    def _build_gigachat_functions(self) -> List[Function]:
+        """Конвертирует наши tool schemas в GigaChat Function объекты."""
+        functions = []
+        for tool in self.tools:
+            func = Function(
+                name=tool["name"],
+                description=tool["description"],
+                parameters=FunctionParameters(
+                    type=tool["parameters"]["type"],
+                    properties=tool["parameters"]["properties"],
+                    required=tool["parameters"].get("required", [])
+                )
+            )
+            functions.append(func)
+        return functions
+
+    def _build_messages(self, messages: List[Dict[str, Any]]) -> List[Messages]:
+        """Конвертирует dict messages в GigaChat Messages объекты."""
+        gigachat_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "system":
+                gigachat_messages.append(Messages(role=MessagesRole.SYSTEM, content=content))
+            elif role == "user":
+                gigachat_messages.append(Messages(role=MessagesRole.USER, content=content))
+            elif role == "assistant":
+                gigachat_messages.append(Messages(role=MessagesRole.ASSISTANT, content=content))
+            elif role == "function":
+                # Для function results используем ASSISTANT с контекстом
+                gigachat_messages.append(Messages(
+                    role=MessagesRole.ASSISTANT, 
+                    content=f"Результат выполнения {msg.get('name', 'tool')}: {content}"
+                ))
+
+        return gigachat_messages
 
     def run_agent(
         self,
@@ -141,51 +221,83 @@ class GigaChatAgent:
         final_answer = None
 
         for iteration in range(self.config.max_iterations):
-            response = self.client.chat(
-                messages=messages,
-                functions=self.tools if self.tools else None,
-                temperature=self.config.temperature,
-                top_p=self.config.top_p
-            )
+            try:
+                if self._use_native_functions and self.tools:
+                    # Пробуем native function calling
+                    response = self._call_with_functions(messages)
+                else:
+                    # Fallback: ручной парсинг тегов
+                    response = self._call_simple(messages)
 
-            assistant_message = response.choices[0].message
-            content = assistant_message.content or ""
+                assistant_message = response.choices[0].message
+                content = assistant_message.content or ""
 
-            if hasattr(assistant_message, 'function_call') and assistant_message.function_call:
-                func_call = assistant_message.function_call
-                tool_name = func_call.name
-                tool_args = json.loads(func_call.arguments) if isinstance(func_call.arguments, str) else func_call.arguments
+                # Проверяем native function call
+                native_tool_calls = []
+                if hasattr(assistant_message, 'function_call') and assistant_message.function_call:
+                    func_call = assistant_message.function_call
+                    try:
+                        args = json.loads(func_call.arguments) if isinstance(func_call.arguments, str) else func_call.arguments
+                        native_tool_calls.append(ToolCall(name=func_call.name, arguments=args, call_id="native_1"))
+                    except:
+                        pass
 
-                observation = self._execute_tool(tool_name, tool_args)
+                # Проверяем теги в контенте (manual parsing)
+                manual_tool_calls = self._parse_tool_calls(content)
 
-                step = AgentStep(
-                    thought=content,
-                    tool_calls=[ToolCall(name=tool_name, arguments=tool_args, call_id="1")],
-                    observation=str(observation)[:2000],
-                    is_final=False
-                )
-                steps.append(step)
+                all_tool_calls = native_tool_calls + manual_tool_calls
 
-                messages.append({
-                    "role": "assistant",
-                    "content": content,
-                    "function_call": {
-                        "name": tool_name,
-                        "arguments": json.dumps(tool_args)
-                    }
-                })
-                messages.append({
-                    "role": "function",
-                    "name": tool_name,
-                    "content": str(observation)[:2000]
-                })
+                if all_tool_calls:
+                    # Убираем tool calls из контента для thought
+                    clean_content = self._remove_tool_calls_from_content(content)
 
-            else:
-                final_answer = content
+                    # Выполняем все tool calls
+                    observations = []
+                    for tc in all_tool_calls:
+                        obs = self._execute_tool(tc.name, tc.arguments)
+                        observations.append(str(obs)[:1500])
+
+                        # Добавляем в историю
+                        messages.append({
+                            "role": "assistant",
+                            "content": clean_content or f"Вызов инструмента {tc.name}"
+                        })
+                        messages.append({
+                            "role": "function",
+                            "name": tc.name,
+                            "content": str(obs)[:1500]
+                        })
+
+                    step = AgentStep(
+                        thought=clean_content or f"Вызов инструмента {all_tool_calls[0].name}",
+                        tool_calls=all_tool_calls,
+                        observation="\n---\n".join(observations),
+                        is_final=False
+                    )
+                    steps.append(step)
+
+                else:
+                    # Финальный ответ
+                    final_answer = content
+                    steps.append(AgentStep(
+                        thought=content,
+                        is_final=True,
+                        final_answer=content
+                    ))
+                    break
+
+            except Exception as e:
+                # Если native function calling падает — переключаемся на manual
+                if self._use_native_functions and "function" in str(e).lower():
+                    self._use_native_functions = False
+                    continue
+
+                # Иначе — ошибка
+                final_answer = f"Ошибка при выполнении анализа: {str(e)}"
                 steps.append(AgentStep(
-                    thought=content,
+                    thought=final_answer,
                     is_final=True,
-                    final_answer=content
+                    final_answer=final_answer
                 ))
                 break
 
@@ -196,61 +308,102 @@ class GigaChatAgent:
             "conversation": messages
         }
 
+    def _call_with_functions(self, messages: List[Dict[str, Any]]):
+        """Вызов с native function calling."""
+        gigachat_messages = self._build_messages(messages)
+        functions = self._build_gigachat_functions()
+
+        chat = Chat(
+            messages=gigachat_messages,
+            functions=functions,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p
+        )
+
+        return self.client.chat(chat)
+
+    def _call_simple(self, messages: List[Dict[str, Any]]):
+        """Вызов без function calling (manual parsing)."""
+        gigachat_messages = self._build_messages(messages)
+
+        chat = Chat(
+            messages=gigachat_messages,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p
+        )
+
+        return self.client.chat(chat)
+
     def _run_agent_stream(self, messages: List[Dict[str, Any]]) -> Generator[str, None, None]:
         for iteration in range(self.config.max_iterations):
-            response = self.client.chat(
-                messages=messages,
-                functions=self.tools if self.tools else None,
-                temperature=self.config.temperature,
-                top_p=self.config.top_p
-            )
+            try:
+                if self._use_native_functions and self.tools:
+                    response = self._call_with_functions(messages)
+                else:
+                    response = self._call_simple(messages)
 
-            assistant_message = response.choices[0].message
-            content = assistant_message.content or ""
-
-            yield json.dumps({
-                "type": "thought",
-                "content": content,
-                "iteration": iteration + 1
-            }) + "\n"
-
-            if hasattr(assistant_message, 'function_call') and assistant_message.function_call:
-                func_call = assistant_message.function_call
-                tool_name = func_call.name
-                tool_args = json.loads(func_call.arguments) if isinstance(func_call.arguments, str) else func_call.arguments
+                assistant_message = response.choices[0].message
+                content = assistant_message.content or ""
 
                 yield json.dumps({
-                    "type": "tool_call",
-                    "name": tool_name,
-                    "arguments": tool_args
+                    "type": "thought",
+                    "content": content,
+                    "iteration": iteration + 1
                 }) + "\n"
 
-                observation = self._execute_tool(tool_name, tool_args)
+                native_tool_calls = []
+                if hasattr(assistant_message, 'function_call') and assistant_message.function_call:
+                    func_call = assistant_message.function_call
+                    try:
+                        args = json.loads(func_call.arguments) if isinstance(func_call.arguments, str) else func_call.arguments
+                        native_tool_calls.append(ToolCall(name=func_call.name, arguments=args, call_id="native_1"))
+                    except:
+                        pass
+
+                manual_tool_calls = self._parse_tool_calls(content)
+                all_tool_calls = native_tool_calls + manual_tool_calls
+
+                if all_tool_calls:
+                    clean_content = self._remove_tool_calls_from_content(content)
+
+                    for tc in all_tool_calls:
+                        yield json.dumps({
+                            "type": "tool_call",
+                            "name": tc.name,
+                            "arguments": tc.arguments
+                        }) + "\n"
+
+                        observation = self._execute_tool(tc.name, tc.arguments)
+
+                        yield json.dumps({
+                            "type": "observation",
+                            "content": str(observation)[:1000]
+                        }) + "\n"
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": clean_content or f"Вызов инструмента {tc.name}"
+                        })
+                        messages.append({
+                            "role": "function",
+                            "name": tc.name,
+                            "content": str(observation)[:1500]
+                        })
+                else:
+                    yield json.dumps({
+                        "type": "final",
+                        "content": content
+                    }) + "\n"
+                    break
+
+            except Exception as e:
+                if self._use_native_functions and "function" in str(e).lower():
+                    self._use_native_functions = False
+                    continue
 
                 yield json.dumps({
-                    "type": "observation",
-                    "content": str(observation)[:1000]
-                }) + "\n"
-
-                messages.extend([
-                    {
-                        "role": "assistant",
-                        "content": content,
-                        "function_call": {
-                            "name": tool_name,
-                            "arguments": json.dumps(tool_args)
-                        }
-                    },
-                    {
-                        "role": "function",
-                        "name": tool_name,
-                        "content": str(observation)[:2000]
-                    }
-                ])
-            else:
-                yield json.dumps({
-                    "type": "final",
-                    "content": content
+                    "type": "error",
+                    "content": str(e)
                 }) + "\n"
                 break
 
@@ -266,8 +419,9 @@ class GigaChatAgent:
             return f"Error executing tool '{name}': {str(e)}"
 
     def simple_chat(self, prompt: str) -> str:
-        response = self.client.chat(
-            messages=[{"role": "user", "content": prompt}],
+        chat = Chat(
+            messages=[Messages(role=MessagesRole.USER, content=prompt)],
             temperature=self.config.temperature
         )
+        response = self.client.chat(chat)
         return response.choices[0].message.content
