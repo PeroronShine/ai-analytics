@@ -1,7 +1,7 @@
-streamlit==1.31.0
-gigachat==0.1.22
-pandas==2.2.0
-plotly==5.19.0
-openpyxl==3.1.2
-python-dotenv==1.0.0
-langchain-gigachat==0.2.0
+streamlit
+gigachat
+pandas
+plotly
+openpyxl
+python-dotenv
+langchain-gigachat
