@@ -301,9 +301,9 @@ class QwenAnalyticsAgent:
         return "\n".join(prompt_parts)
 
     def generate_code(self, user_query: Optional[str], auto_eda: bool = False) -> dict:
-        """Генерация кода"""
-        
-        system_prompt = """Ты эксперт по анализу данных. Отвечай ТОЛЬКО валидным JSON:
+    """Генерация кода через gen-api.ru"""
+    
+    system_prompt = """Ты эксперт по анализу данных. Отвечай ТОЛЬКО валидным JSON:
 {
 "thought": "краткое рассуждение",
 "code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import!",
@@ -316,41 +316,110 @@ class QwenAnalyticsAgent:
 3. result = ... для табличных итогов
 4. print() для текстовых выводов"""
 
-        if auto_eda:
-            context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nДанные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nВыполни пошагово:\n{self._generate_auto_eda_prompt()}"
-        else:
-            context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
+    if auto_eda:
+        context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nДанные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nВыполни пошагово:\n{self._generate_auto_eda_prompt()}"
+    else:
+        context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
 
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
+    headers = {
+        'Authorization': f'Bearer {self.api_key}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+    
+    input_data = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": context}
+        ],
+        "is_sync": True,
+        "temperature": 0.2 if auto_eda else 0.3,
+        "top_p": 0.9,
+        "response_format": {"type": "json_object"}
+    }
+    
+    try:
+        response = requests.post(
+            self.base_url,
+            headers=headers,
+            json=input_data,
+            timeout=90 if auto_eda else 60
+        )
         
-        input_data = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context}
-            ],
-            "is_sync": True,
-            "temperature": 0.2 if auto_eda else 0.3,
-            "top_p": 0.9,
-            "response_format": {"type": "json_object"}
-        }
-        
-        try:
-            response = requests.post(self.base_url, headers=headers, json=input_data, timeout=90 if auto_eda else 60)
+        if response.status_code == 200:
+            result = response.json()
             
-            if response.status_code == 200:
-                result = response.json()
-                content = result.get('output') or result.get('choices', [{}])[0].get('message', {}).get('content', '') or json.dumps(result)
-                return {'success': True, 'content': content, 'raw_response': result}
-            else:
-                return {'success': False, 'error_type': f'HTTP_{response.status_code}', 'message': f'Ошибка {response.status_code}', 'details': response.text}
+            # === ИСПРАВЛЕНИЕ: правильная обработка ответа gen-api.ru ===
+            content = None
+            
+            # Вариант 1: поле "response" (массив строк JSON)
+            if "response" in result and isinstance(result["response"], list) and len(result["response"]) > 0:
+                response_str = result["response"][0]
+                try:
+                    # Пробуем распарсить строку как JSON
+                    parsed = json.loads(response_str)
+                    content = json.dumps(parsed, ensure_ascii=False)
+                except:
+                    content = response_str
+            
+            # Вариант 2: поле "output"
+            elif "output" in result:
+                content = result["output"]
+            
+            # Вариант 3: OpenAI-style (choices)
+            elif "choices" in result and len(result["choices"]) > 0:
+                content = result["choices"][0].get("message", {}).get("content", "")
+            
+            # Вариант 4: поле "result"
+            elif "result" in result:
+                content = result["result"]
+            
+            # Если ничего не нашли
+            if content is None:
+                content = json.dumps(result, ensure_ascii=False)
+            
+            return {
+                'success': True,
+                'content': content,
+                'raw_response': result
+            }
+        else:
+            error_details = response.text
+            try:
+                error_details = response.json()
+            except:
+                pass
                 
-        except Exception as e:
-            return {'success': False, 'error_type': type(e).__name__, 'message': str(e), 'details': traceback.format_exc()}
-
+            return {
+                'success': False,
+                'error_type': f'HTTP_{response.status_code}',
+                'message': f'Ошибка API: {response.status_code}',
+                'details': error_details,
+                'status_code': response.status_code
+            }
+                
+    except requests.exceptions.Timeout:
+        return {
+            'success': False,
+            'error_type': 'Timeout',
+            'message': 'Превышено время ожидания ответа от API',
+            'details': 'Попробуйте повторить запрос или упростите задачу'
+        }
+    except requests.exceptions.ConnectionError:
+        return {
+            'success': False,
+            'error_type': 'ConnectionError',
+            'message': 'Нет подключения к API серверу',
+            'details': 'Проверьте интернет-соединение'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error_type': type(e).__name__,
+            'message': f'Ошибка: {str(e)}',
+            'details': traceback.format_exc()
+        }
+        
     def run_analysis(self, user_query: Optional[str], df: pd.DataFrame, auto_eda: bool = False, theme: str = 'plotly_white') -> dict:
         """Запуск анализа"""
         self.prepare_dataset_context(df)
