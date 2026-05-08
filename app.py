@@ -1,9 +1,11 @@
+# app.py - AI Analytics Agent для gen-api.ru Qwen3.6
 import ssl
 import os
 import re
 import json
 import base64
 import requests
+import time
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -16,7 +18,6 @@ import ast
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from typing import Optional, Union, List
-import time 
 
 # Отключаем предупреждения SSL
 try:
@@ -242,7 +243,6 @@ class QwenAnalyticsAgent:
         numeric_cols = df.select_dtypes(include='number').columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
         
-        # Анализ для авто-рекомендаций
         recommendations = []
         if numeric_cols:
             recommendations.append(f"📊 Построить гистограммы для: {', '.join(numeric_cols[:3])}")
@@ -271,10 +271,8 @@ class QwenAnalyticsAgent:
         info = self.df_info
         prompt_parts = []
         
-        # Базовая статистика
         prompt_parts.append("1. Покажи базовую статистику: df.describe() для числовых столбцов, df['col'].value_counts() для категориальных")
         
-        # Визуализации для числовых
         if info['numeric_cols']:
             cols = info['numeric_cols'][:3]
             prompt_parts.append(f"2. Построй гистограммы для: {', '.join(cols)} через px.histogram с save_fig()")
@@ -283,27 +281,24 @@ class QwenAnalyticsAgent:
             if len(info['numeric_cols']) >= 3:
                 prompt_parts.append("4. Если >=3 числовых столбца: покажи корреляционную матрицу через df.corr().style или px.imshow()")
         
-        # Визуализации для категориальных
         if info['categorical_cols']:
             col = info['categorical_cols'][0]
             prompt_parts.append(f"5. Построй бар-чарт распределения '{col}': px.bar(df['{col}'].value_counts()) с save_fig()")
             if info['categorical_cols'] and info['numeric_cols']:
                 prompt_parts.append(f"6. Сравни '{info['numeric_cols'][0]}' по '{info['categorical_cols'][0]}': px.box или px.violin с save_fig()")
         
-        # Пропуски
         if info['missing']:
             prompt_parts.append("7. Визуализируй пропуски: px.bar(pd.DataFrame({'missing': df.isnull().sum()})) с save_fig()")
         
-        # Итог
         prompt_parts.append("8. Выведи print() с краткими инсайтами по данным")
         prompt_parts.append("9. Сохрани итоговую таблицу в result = df.describe() или аналогичную")
         
         return "\n".join(prompt_parts)
 
     def generate_code(self, user_query: Optional[str], auto_eda: bool = False) -> dict:
-    """Генерация кода через gen-api.ru"""
-    
-    system_prompt = """Ты эксперт по анализу данных. Отвечай ТОЛЬКО валидным JSON:
+        """Генерация кода через gen-api.ru - ИСПРАВЛЕНО"""
+        
+        system_prompt = """Ты эксперт по анализу данных. Отвечай ТОЛЬКО валидным JSON:
 {
 "thought": "краткое рассуждение",
 "code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import!",
@@ -316,110 +311,110 @@ class QwenAnalyticsAgent:
 3. result = ... для табличных итогов
 4. print() для текстовых выводов"""
 
-    if auto_eda:
-        context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nДанные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nВыполни пошагово:\n{self._generate_auto_eda_prompt()}"
-    else:
-        context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
-
-    headers = {
-        'Authorization': f'Bearer {self.api_key}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
-    
-    input_data = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context}
-        ],
-        "is_sync": True,
-        "temperature": 0.2 if auto_eda else 0.3,
-        "top_p": 0.9,
-        "response_format": {"type": "json_object"}
-    }
-    
-    try:
-        response = requests.post(
-            self.base_url,
-            headers=headers,
-            json=input_data,
-            timeout=90 if auto_eda else 60
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            
-            # === ИСПРАВЛЕНИЕ: правильная обработка ответа gen-api.ru ===
-            content = None
-            
-            # Вариант 1: поле "response" (массив строк JSON)
-            if "response" in result and isinstance(result["response"], list) and len(result["response"]) > 0:
-                response_str = result["response"][0]
-                try:
-                    # Пробуем распарсить строку как JSON
-                    parsed = json.loads(response_str)
-                    content = json.dumps(parsed, ensure_ascii=False)
-                except:
-                    content = response_str
-            
-            # Вариант 2: поле "output"
-            elif "output" in result:
-                content = result["output"]
-            
-            # Вариант 3: OpenAI-style (choices)
-            elif "choices" in result and len(result["choices"]) > 0:
-                content = result["choices"][0].get("message", {}).get("content", "")
-            
-            # Вариант 4: поле "result"
-            elif "result" in result:
-                content = result["result"]
-            
-            # Если ничего не нашли
-            if content is None:
-                content = json.dumps(result, ensure_ascii=False)
-            
-            return {
-                'success': True,
-                'content': content,
-                'raw_response': result
-            }
+        if auto_eda:
+            context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nДанные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nВыполни пошагово:\n{self._generate_auto_eda_prompt()}"
         else:
-            error_details = response.text
-            try:
-                error_details = response.json()
-            except:
-                pass
+            context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
+
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        input_data = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context}
+            ],
+            "is_sync": True,
+            "temperature": 0.2 if auto_eda else 0.3,
+            "top_p": 0.9,
+            "response_format": {"type": "json_object"}
+        }
+        
+        try:
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=input_data,
+                timeout=90 if auto_eda else 60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
                 
+                # === ИСПРАВЛЕНИЕ: правильная обработка ответа gen-api.ru ===
+                content = None
+                
+                # Вариант 1: поле "response" (массив строк JSON)
+                if "response" in result and isinstance(result["response"], list) and len(result["response"]) > 0:
+                    response_str = result["response"][0]
+                    try:
+                        # Пробуем распарсить строку как JSON
+                        parsed = json.loads(response_str)
+                        content = json.dumps(parsed, ensure_ascii=False)
+                    except:
+                        content = response_str
+                
+                # Вариант 2: поле "output"
+                elif "output" in result:
+                    content = result["output"]
+                
+                # Вариант 3: OpenAI-style (choices)
+                elif "choices" in result and len(result["choices"]) > 0:
+                    content = result["choices"][0].get("message", {}).get("content", "")
+                
+                # Вариант 4: поле "result"
+                elif "result" in result:
+                    content = result["result"]
+                
+                # Если ничего не нашли
+                if content is None:
+                    content = json.dumps(result, ensure_ascii=False)
+                
+                return {
+                    'success': True,
+                    'content': content,
+                    'raw_response': result
+                }
+            else:
+                error_details = response.text
+                try:
+                    error_details = response.json()
+                except:
+                    pass
+                    
+                return {
+                    'success': False,
+                    'error_type': f'HTTP_{response.status_code}',
+                    'message': f'Ошибка API: {response.status_code}',
+                    'details': error_details,
+                    'status_code': response.status_code
+                }
+                
+        except requests.exceptions.Timeout:
             return {
                 'success': False,
-                'error_type': f'HTTP_{response.status_code}',
-                'message': f'Ошибка API: {response.status_code}',
-                'details': error_details,
-                'status_code': response.status_code
+                'error_type': 'Timeout',
+                'message': 'Превышено время ожидания ответа от API',
+                'details': 'Попробуйте повторить запрос или упростите задачу'
             }
-                
-    except requests.exceptions.Timeout:
-        return {
-            'success': False,
-            'error_type': 'Timeout',
-            'message': 'Превышено время ожидания ответа от API',
-            'details': 'Попробуйте повторить запрос или упростите задачу'
-        }
-    except requests.exceptions.ConnectionError:
-        return {
-            'success': False,
-            'error_type': 'ConnectionError',
-            'message': 'Нет подключения к API серверу',
-            'details': 'Проверьте интернет-соединение'
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error_type': type(e).__name__,
-            'message': f'Ошибка: {str(e)}',
-            'details': traceback.format_exc()
-        }
-        
+        except requests.exceptions.ConnectionError:
+            return {
+                'success': False,
+                'error_type': 'ConnectionError',
+                'message': 'Нет подключения к API серверу',
+                'details': 'Проверьте интернет-соединение'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error_type': type(e).__name__,
+                'message': f'Ошибка: {str(e)}',
+                'details': traceback.format_exc()
+            }
+
     def run_analysis(self, user_query: Optional[str], df: pd.DataFrame, auto_eda: bool = False, theme: str = 'plotly_white') -> dict:
         """Запуск анализа"""
         self.prepare_dataset_context(df)
@@ -477,7 +472,7 @@ def download_plotly_fig(fig, filename: str, format: str = 'png'):
 
 
 # ================= UI =================
-st.set_page_config(page_title="AI Analytics Pro", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="🤖 AI Analytics Pro", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -620,16 +615,25 @@ if uploaded_file:
                         with st.expander("💭 Рассуждения агента", expanded=run_auto):
                             st.markdown(result['thought'])
                     
-                    with st.expander("📝 Код", expanded=False):
-                        st.code(result['code'], language='python')
+                    # === КОД С ПРОВЕРКОЙ ===
+                    code = result.get('code', '')
+                    if code and code.strip():
+                        with st.expander("📝 Сгенерированный код", expanded=False):
+                            st.code(code, language='python')
+                            st.caption("💡 Совет: скопируйте и модифицируйте под свои нужды")
+                    else:
+                        st.warning("⚠️ Код не сгенерирован или пустой")
+                        with st.expander("🔍 Отладка"):
+                            st.write("**Полный ответ от агента:**")
+                            st.json(result)
                     
                     if result.get('output'):
-                        with st.expander("📤 Вывод", expanded=True):
+                        with st.expander("📤 Консольный вывод", expanded=True):
                             for line in result['output']:
                                 st.text(line)
                     
                     if result.get('data_result') is not None:
-                        st.markdown("### 📋 Результаты")
+                        st.markdown("### 📋 Результаты вычислений")
                         if isinstance(result['data_result'], pd.DataFrame):
                             st.dataframe(result['data_result'], use_container_width=True)
                             csv = result['data_result'].to_csv(index=False)
@@ -651,7 +655,7 @@ if uploaded_file:
                             st.plotly_chart(result['figures'][0], use_container_width=True)
                     
                     if result.get('explanation'):
-                        st.info(f"💡 {result['explanation']}")
+                        st.info(f"💡 **Интерпретация:** {result['explanation']}")
                     
                     # === РЕКОМЕНДАЦИИ для авто-анализа ===
                     if run_auto and result.get('recommendations'):
@@ -660,7 +664,7 @@ if uploaded_file:
                             st.markdown(f"• {rec}")
                         st.caption("💡 Нажмите на рекомендацию, скопируйте и вставьте в поле запроса выше")
         
-        # === Кэшированный авто-анализ (если уже выполнен) ===
+        # === Кэшированный авто-анализ ===
         if st.session_state.auto_analysis_result and not (run_manual or run_auto):
             if st.expander("📦 Показать последний авто-анализ", expanded=False):
                 result = st.session_state.auto_analysis_result
