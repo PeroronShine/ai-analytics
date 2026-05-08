@@ -1,7 +1,0 @@
-streamlit==1.31.0
-pandas==2.2.0
-plotly==5.19.0
-openpyxl==3.1.2
-python-dotenv==1.0.0
-requests==2.31.0
-numpy==1.26.4
