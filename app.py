@@ -1,23 +1,17 @@
+# app.py - AI Analytics Agent (LLM анализирует → Streamlit визуализирует)
 import ssl
 import os
 import re
 import json
-import base64
 import requests
-import time
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from io import StringIO, BytesIO
 import traceback
-import ast
-from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
-from typing import Optional, Union, List
-import html
+from typing import Optional, List
 
 # Отключаем SSL предупреждения
 try:
@@ -30,7 +24,7 @@ os.environ["CURL_CA_BUNDLE"] = ""
 
 px.defaults.template = "plotly_white"
 
-# Усиленная защита от prompt-injection
+# Защита от prompt-injection (проверка входящих запросов пользователя)
 FORBIDDEN_PATTERNS = [
     r'eval\s*\(', r'exec\s*\(', r'compile\s*\(',
     r'import\s+os', r'import\s+sys', r'import\s+subprocess',
@@ -38,196 +32,13 @@ FORBIDDEN_PATTERNS = [
     r'__import__', r'__builtins__', r'__class__',
     r'open\s*\(', r'read\s*\(', r'write\s*\(',
     r'input\s*\(', r'breakpoint\s*\(',
-    r'getattr\s*\(', r'setattr\s*\(', r'delattr\s*\(',
-    r'globals\s*\(', r'locals\s*\(', r'vars\s*\(',
-    r'execfile', r'runpy', r'imp\.',
-    r'pickle', r'marshal', r'shelve',
+    r'pickle', r'marshal', r'shelve'
 ]
-
 FORBIDDEN_WORDS = ['del ', 'raise ', 'pass ', 'yield ']
 
 
-class SafeCodeExecutor:
-    """Безопасный исполнитель кода с усиленной защитой"""
-    
-    def __init__(self, df: pd.DataFrame, timeout: int = 30, theme: str = 'plotly_white'):
-        self.df = df.copy()
-        self.timeout = timeout
-        self.output = []
-        self.figures = []
-        self.theme = theme
-        px.defaults.template = theme
-
-    def _safe_globals(self):
-        """Безопасное окружение - ТОЛЬКО разрешенные модули"""
-        allowed_modules = {
-            'pd': pd, 'pandas': pd,
-            'np': np, 'numpy': np,
-            'px': px, 'plotly': __import__('plotly'), 'go': go,
-            'make_subplots': make_subplots,
-            'math': __import__('math'), 're': __import__('re'),
-            'json': __import__('json'), 'datetime': __import__('datetime'),
-            'StringIO': StringIO,
-        }
-
-        builtins_dict = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__
-        safe_builtins = {
-            k: v for k, v in builtins_dict.items() 
-            if k not in ['eval', 'exec', 'compile', 'import', 'open', 'input', '__import__']
-        }
-
-        return {
-            '__builtins__': safe_builtins,
-            'df': self.df,
-            'print': lambda *args: self.output.append(' '.join(map(str, args))),
-            'save_fig': self._save_fig_callback,
-            'display_fig': self._display_fig_callback,
-            'create_dashboard': self._create_dashboard_callback,
-            'theme': self.theme,
-            **allowed_modules
-        }
-
-    def _normalize_figure(self, fig) -> go.Figure:
-        if isinstance(fig, go.Figure):
-            fig.update_layout(template=self.theme, height=500, margin=dict(l=40, r=40, t=40, b=40))
-            return fig
-        elif hasattr(fig, 'to_plotly_json'):
-            return go.Figure(fig)
-        else:
-            try:
-                return go.Figure(data=fig)
-            except:
-                return None
-
-    def _save_fig_callback(self, fig, filename: str = "plot", title: str = None, **layout_kwargs):
-        try:
-            normalized = self._normalize_figure(fig)
-            if normalized:
-                if title:
-                    normalized.update_layout(title={'text': title, 'x': 0.5, 'xanchor': 'center'})
-                if layout_kwargs:
-                    normalized.update_layout(**layout_kwargs)
-                self.figures.append({'fig': normalized, 'name': filename, 'title': title})
-                return f"✅ График '{filename}' создан"
-            return "❌ Ошибка"
-        except Exception as e:
-            return f"❌ Ошибка: {str(e)}"
-
-    def _display_fig_callback(self, fig, title: str = None):
-        return self._save_fig_callback(fig, filename=f"viz_{len(self.figures)+1}", title=title)
-
-    def _create_dashboard_callback(self, figs: List, titles: List[str] = None, 
-                                  subplot_titles: List[str] = None, rows: int = None, cols: int = None):
-        if not figs:
-            return "❌ Нет графиков"
-        
-        n = len(figs)
-        if rows and cols:
-            pass
-        elif n == 1:
-            rows, cols = 1, 1
-        elif n <= 2:
-            rows, cols = 1, 2
-        elif n <= 4:
-            rows, cols = 2, 2
-        else:
-            rows, cols = (n + 1) // 2, 2
-        
-        dashboard = make_subplots(rows=rows, cols=cols, subplot_titles=subplot_titles or titles)
-        
-        for idx, fig in enumerate(figs[:rows*cols]):
-            normalized = self._normalize_figure(fig)
-            if normalized:
-                row = idx // cols + 1
-                col = idx % cols + 1
-                for trace in normalized.data:
-                    dashboard.add_trace(trace, row=row, col=col)
-        
-        dashboard.update_layout(
-            template=self.theme, 
-            height=500 * rows,
-            title={'text': "Аналитический дашборд", 'x': 0.5, 'xanchor': 'center'},
-            showlegend=True
-        )
-        
-        return self._save_fig_callback(dashboard, filename="dashboard", title="Аналитический дашборд")
-
-    def _validate_code(self, code: str) -> tuple:
-        """Усиленная проверка кода на безопасность"""
-        # Проверка 1: Синтаксис
-        try:
-            tree = ast.parse(code)
-        except SyntaxError as e:
-            return False, f"Синтаксическая ошибка"
-
-        # Проверка 2: Запрещенные паттерны
-        for pattern in FORBIDDEN_PATTERNS:
-            if re.search(pattern, code, re.IGNORECASE):
-                return False, f"Обнаружен опасный паттерн"
-        
-        # Проверка 3: Запрещенные слова
-        for word in FORBIDDEN_WORDS:
-            if f" {word}" in code or code.startswith(word):
-                return False, f"Обнаружено опасное слово: {word}"
-
-        # Проверка 4: AST анализ
-        for node in ast.walk(tree):
-            # Запрет импортов
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                return False, "Импорты запрещены"
-            
-            # Запрет опасных функций
-            if isinstance(node, ast.Call):
-                func_name = None
-                if isinstance(node.func, ast.Name):
-                    func_name = node.func.id
-                elif isinstance(node.func, ast.Attribute):
-                    func_name = node.func.attr
-                
-                if func_name in ['eval', 'exec', 'compile', 'open', 'input', '__import__']:
-                    return False, f"Функция {func_name} запрещена"
-        
-        return True, "OK"
-
-    def execute(self, code: str) -> dict:
-        """Выполнение кода"""
-        result = {'success': False, 'output': [], 'error': None, 'figures': [], 'data_result': None}
-
-        is_valid, message = self._validate_code(code)
-        if not is_valid:
-            result['error'] = f"Код отклонён: {message}"
-            return result
-
-        try:
-            safe_globals = self._safe_globals()
-            local_vars = {}
-
-            stdout_capture = StringIO()
-            stderr_capture = StringIO()
-            
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                exec(code, safe_globals, local_vars)
-
-            result['output'] = self.output
-            result['figures'] = [item['fig'] if isinstance(item, dict) and 'fig' in item else item 
-                                for item in self.figures if isinstance(item, (go.Figure, dict))]
-            
-            if 'result' in local_vars:
-                result['data_result'] = local_vars['result']
-            elif 'df_result' in local_vars:
-                result['data_result'] = local_vars['df_result']
-            
-            result['success'] = True
-
-        except Exception as e:
-            result['error'] = f"Ошибка выполнения: {type(e).__name__}: {str(e)}"
-            result['traceback'] = traceback.format_exc()
-
-        return result
-
-
 class QwenAnalyticsAgent:
-    """Агент для gen-api.ru"""
+    """Агент для gen-api.ru — LLM анализирует данные в своём интерпретаторе"""
     
     def __init__(self, api_key: str, model: str = "qwen-3-6-plus"):
         self.api_key = api_key
@@ -236,7 +47,7 @@ class QwenAnalyticsAgent:
         self.base_url = "https://api.gen-api.ru/api/v1/networks/qwen-3-6-plus"
         
     def test_connection(self) -> dict:
-        """Тест подключения"""
+        """Тест подключения к API"""
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
@@ -255,20 +66,10 @@ class QwenAnalyticsAgent:
         except Exception as e:
             return {'success': False, 'error': f"❌ {type(e).__name__}", 'details': str(e)}
 
-    def prepare_dataset_context(self, df: pd.DataFrame, user_context: Optional[str] = None):
-        """Подготовка контекста данных"""
+    def prepare_dataset_context(self, df: pd.DataFrame):
+        """Подготовка метаданных датасета для отправки в LLM"""
         numeric_cols = df.select_dtypes(include='number').columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-        
-        recommendations = []
-        if numeric_cols:
-            recommendations.append(f"📊 Гистограммы: {', '.join(numeric_cols[:3])}")
-            if len(numeric_cols) >= 2:
-                recommendations.append(f"🔗 Корреляции: {numeric_cols[0]} и {numeric_cols[1]}")
-        if categorical_cols:
-            recommendations.append(f"🥧 Распределение: {categorical_cols[0]}")
-            if categorical_cols and numeric_cols:
-                recommendations.append(f"📈 Сравнение {numeric_cols[0]} по {categorical_cols[0]}")
         
         self.df_info = {
             'shape': df.shape,
@@ -276,62 +77,37 @@ class QwenAnalyticsAgent:
             'dtypes': df.dtypes.astype(str).to_dict(),
             'numeric_cols': numeric_cols,
             'categorical_cols': categorical_cols,
-            'sample': df.head(2).to_dict(orient='records'),
+            'sample': df.head(3).to_dict(orient='records'),
             'missing': {k: int(v) for k, v in df.isnull().sum().items() if v > 0},
-            'recommendations': recommendations[:5],
-            'user_context': user_context if user_context else "Проведи полный анализ датасета"
+            'numeric_stats': df[numeric_cols].describe().to_dict() if numeric_cols else {},
+            'categorical_stats': {col: df[col].value_counts().head(5).to_dict() for col in categorical_cols[:3]}
         }
 
-    def _generate_auto_eda_prompt(self) -> str:
-        """Промпт для авто-анализа"""
-        info = self.df_info
-        prompt_parts = []
+    def generate_analysis(self, user_query: str, auto_mode: bool) -> dict:
+        """
+        LLM запускает код в СВОЁМ интерпретаторе и возвращает ТОЛЬКО текстовый отчёт.
+        Мы не выполняем код локально — только принимаем результат.
+        """
         
-        prompt_parts.append("1. Покажи описательную статистику: df.describe() и value_counts() для категориальных")
-        
-        if info['numeric_cols']:
-            cols = info['numeric_cols'][:3]
-            prompt_parts.append(f"2. Гистограммы: {', '.join(cols)} через px.histogram с save_fig()")
-            if len(info['numeric_cols']) >= 2:
-                prompt_parts.append(f"3. Scatter plot: px.scatter(df, x='{info['numeric_cols'][0]}', y='{info['numeric_cols'][1]}') с save_fig()")
-            if len(info['numeric_cols']) >= 3:
-                prompt_parts.append("4. Корреляционная матрица: df.corr() или px.imshow()")
-        
-        if info['categorical_cols']:
-            col = info['categorical_cols'][0]
-            prompt_parts.append(f"5. Бар-чарт: px.bar(df['{col}'].value_counts()) с save_fig()")
-            if info['categorical_cols'] and info['numeric_cols']:
-                prompt_parts.append(f"6. Box plot: px.box сравнение '{info['numeric_cols'][0]}' по '{info['categorical_cols'][0]}' с save_fig()")
-        
-        if info['missing']:
-            prompt_parts.append("7. Визуализация пропусков с save_fig()")
-        
-        prompt_parts.append("8. print() с ключевыми инсайтами")
-        prompt_parts.append("9. result = df.describe() или итоговая таблица")
-        
-        return "\n".join(prompt_parts)
-
-    def generate_code(self, user_query: Optional[str], auto_eda: bool = False, user_context: Optional[str] = None) -> dict:
-        """Генерация кода - ИСПРАВЛЕНО"""
-        
-        system_prompt = """Ты эксперт по анализу данных. Отвечай ТОЛЬКО валидным JSON:
+        system_prompt = """Ты эксперт по анализу данных. У тебя есть доступ к датасету и Python-интерпретатору.
+Проведи анализ и верни ТОЛЬКО валидный JSON:
 {
-"thought": "краткое рассуждение",
-"code": "Python код. УЖЕ импортированы: pd, np, px, go. НЕ пиши import! Используй: df, save_fig(fig, 'name', title='...'), print(), result",
-"explanation": "что покажут результаты"
+"thought": "краткое рассуждение о подходе (2-3 предложения)",
+"insights": ["ключевой вывод 1", "ключевой вывод 2", "ключевой вывод 3"],
+"metrics_text": "Статистика:\\n• Среднее X: ...\\n• Медиана Y: ...\\n• Корреляция: ...",
+"explanation": "бизнес-интерпретация результатов (2-4 предложения)"
 }
 
 ПРАВИЛА:
-1. Всегда save_fig(fig, 'unique_name', title='...') для графиков
-2. Используй px для графиков
-3. result = ... для таблиц
-4. print() для выводов
-5. НЕ генерируй HTML или Markdown в output"""
+1. Ты выполняешь код в своём интерпретаторе (describe, groupby, corr, value_counts и т.д.)
+2. В ответе — ТОЛЬКО текст и цифры. Никакого кода, графиков, plotly, matplotlib.
+3. metrics_text — человекочитаемый текст с метриками, не JSON.
+4. insights — список коротких утверждений фактов."""
 
-        if auto_eda:
-            context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nДанные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nКонтекст от пользователя: {self.df_info.get('user_context', 'Проведи полный анализ')}\n\nВыполни:\n{self._generate_auto_eda_prompt()}"
+        if auto_mode:
+            context = f"АВТО-АНАЛИЗ ДАТАСЕТА.\nМетаданные: {json.dumps(self.df_info, ensure_ascii=False)}\n\nЗадача: Проведи полный статистический анализ. Найди: 1) распределения, 2) выбросы, 3) корреляции, 4) групповые сравнения. Верни текстовый отчёт."
         else:
-            context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nКонтекст: {user_context if user_context else 'Выполни запрос'}\nЗадача: {user_query}"
+            context = f"Метаданные датасета: {json.dumps(self.df_info, ensure_ascii=False)}\nЗапрос пользователя: {user_query}\n\nПроведи анализ согласно запросу и верни текстовый отчёт."
 
         headers = {
             'Authorization': f'Bearer {self.api_key}',
@@ -345,7 +121,7 @@ class QwenAnalyticsAgent:
                 {"role": "user", "content": context}
             ],
             "is_sync": True,
-            "temperature": 0.2 if auto_eda else 0.3,
+            "temperature": 0.2 if auto_mode else 0.3,
             "top_p": 0.9,
             "response_format": {"type": "json_object"}
         }
@@ -355,147 +131,109 @@ class QwenAnalyticsAgent:
                 self.base_url,
                 headers=headers,
                 json=input_data,
-                timeout=90 if auto_eda else 60
+                timeout=120 if auto_mode else 90
             )
             
             if response.status_code == 200:
                 result = response.json()
                 
-                # Обработка ответа gen-api.ru
+                # Обработка ответа gen-api.ru (поле "response" — массив строк)
                 content = None
-                
-                if "response" in result and isinstance(result["response"], list) and len(result["response"]) > 0:
+                if "response" in result and isinstance(result["response"], list) and result["response"]:
                     response_str = result["response"][0]
                     try:
-                        parsed = json.loads(response_str)
-                        content = json.dumps(parsed, ensure_ascii=False)
+                        content = json.dumps(json.loads(response_str), ensure_ascii=False)
                     except:
                         content = response_str
                 elif "output" in result:
                     content = result["output"]
-                elif "choices" in result and len(result["choices"]) > 0:
+                elif "choices" in result and result["choices"]:
                     content = result["choices"][0].get("message", {}).get("content", "")
-                elif "result" in result:
-                    content = result["result"]
                 
                 if content is None:
                     content = json.dumps(result, ensure_ascii=False)
                 
-                return {
-                    'success': True,
-                    'content': content,
-                    'raw_response': result
-                }
+                return {'success': True, 'content': content}
             else:
                 return {
                     'success': False,
                     'error_type': f'HTTP_{response.status_code}',
                     'message': f'Ошибка API: {response.status_code}',
-                    'details': response.text,
-                    'status_code': response.status_code
+                    'details': response.text[:500] if isinstance(response.text, str) else str(response.text)
                 }
                 
+        except requests.exceptions.Timeout:
+            return {'success': False, 'error_type': 'Timeout', 'message': 'Превышено время ожидания', 'details': 'Попробуйте упростить запрос'}
+        except requests.exceptions.ConnectionError:
+            return {'success': False, 'error_type': 'ConnectionError', 'message': 'Нет подключения к API', 'details': 'Проверьте интернет'}
         except Exception as e:
-            return {
-                'success': False,
-                'error_type': type(e).__name__,
-                'message': f'Ошибка: {str(e)}',
-                'details': traceback.format_exc()
-            }
+            return {'success': False, 'error_type': type(e).__name__, 'message': str(e), 'details': traceback.format_exc()[:500]}
 
-    def run_analysis(self, user_query: Optional[str], df: pd.DataFrame, auto_eda: bool = False, 
-                    theme: str = 'plotly_white', user_context: Optional[str] = None) -> dict:
-        """Запуск анализа"""
-        self.prepare_dataset_context(df, user_context)
-        gen_result = self.generate_code(user_query, auto_eda, user_context)
+    def run_analysis(self, user_query: str, df: pd.DataFrame, auto_mode: bool) -> dict:
+        """Запуск анализа: LLM работает на своей стороне, мы получаем только текст"""
+        self.prepare_dataset_context(df)
+        gen_result = self.generate_analysis(user_query, auto_mode)
         
         if not gen_result['success']:
-            return {'success': False, 'stage': 'api_call', 'error': gen_result.get('message'), 
-                   'error_type': gen_result.get('error_type'), 'details': gen_result.get('details')}
+            return {'success': False, 'stage': 'api', 'error': gen_result.get('message'), 'details': gen_result.get('details')}
         
+        # Парсинг ответа LLM
         try:
-            plan = json.loads(gen_result['content'])
+            report = json.loads(gen_result['content'])
         except:
             match = re.search(r'\{[\s\S]*\}', gen_result['content'])
-            plan = json.loads(match.group()) if match else {"error": "Parse error", "code": "print('Error')"}
-
-        code = plan.get('code', '')
-        executor = SafeCodeExecutor(df, theme=theme)
-        exec_result = executor.execute(code)
+            report = json.loads(match.group()) if match else {
+                "error": "Не удалось распарсить ответ LLM",
+                "insights": ["Проверьте запрос и повторите"],
+                "explanation": gen_result['content'][:200]
+            }
 
         return {
-            'success': exec_result['success'],
-            'stage': 'execution',
-            'thought': plan.get('thought', ''),
-            'explanation': plan.get('explanation', ''),
-            'code': code,  # Оставляем для отладки, но НЕ показываем
-            'output': exec_result['output'],
-            'figures': exec_result['figures'],
-            'data_result': exec_result['data_result'],
-            'error': exec_result.get('error'),
-            'traceback': exec_result.get('traceback'),
-            'recommendations': self.df_info.get('recommendations', []) if auto_eda else []
+            'success': True,
+            'thought': report.get('thought', ''),
+            'insights': report.get('insights', []),
+            'metrics_text': report.get('metrics_text', ''),
+            'explanation': report.get('explanation', ''),
+            'raw_response': gen_result['content']  # для отладки
         }
 
 
 def check_safety(query: str) -> tuple:
-    """Усиленная проверка безопасности"""
-    # Проверка 1: Паттерны
+    """Проверка пользовательского запроса на безопасность"""
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, query, re.IGNORECASE):
-            return False, f"⚠️ Обнаружен подозрительный паттерн"
-    
-    # Проверка 2: Слова
+            return False, "⚠️ Обнаружен подозрительный паттерн"
     for word in FORBIDDEN_WORDS:
         if f" {word}" in query or query.startswith(word):
-            return False, f"⚠️ Обнаружено запрещенное слово"
-    
-    # Проверка 3: Экранирование HTML
+            return False, "⚠️ Обнаружено запрещенное слово"
     if '<script' in query.lower() or 'javascript:' in query.lower():
         return False, "⚠️ XSS попытка"
-    
     return True, "✅ Безопасно"
-
-
-def download_plotly_fig(fig, filename: str, format: str = 'png'):
-    """Экспорт графика"""
-    try:
-        if format == 'png':
-            img_bytes = fig.to_image(format="png", width=1200, height=600, scale=2)
-            return base64.b64encode(img_bytes).decode()
-        elif format == 'html':
-            html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
-            return base64.b64encode(html_content.encode()).decode()
-    except:
-        pass
-    return None
 
 
 # ================= UI =================
 st.set_page_config(page_title="AI Analytics Agent", page_icon="📊", layout="wide")
 
-# Стили
 st.markdown("""
 <style>
     .stPlotlyChart {border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);}
-    .metric-card {background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; color: white;}
-    .report-section {background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 10px 0;}
+    .report-box {background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #0068c9; margin: 15px 0;}
+    .insight-tag {display: inline-block; background: #e3f2fd; padding: 5px 12px; border-radius: 20px; margin: 4px 4px 4px 0; font-size: 0.9em;}
+    .metrics-block {background: #fff; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0; font-family: monospace; white-space: pre-wrap;}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🤖 AI Analytics Agent")
-st.markdown("*Интеллектуальный анализ данных на Qwen3.6*")
+st.markdown("*LLM анализирует данные в своём интерпретаторе → Streamlit строит графики*")
 
 # Session state
-if 'analysis_history' not in st.session_state:
-    st.session_state.analysis_history = []
-if 'auto_analysis_result' not in st.session_state:
-    st.session_state.auto_analysis_result = None
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = ""
 
 with st.sidebar:
     st.header("⚙️ Настройки")
-    
-    api_key = st.text_input("🔑 API Token", type="password", help="Введите токен от gen-api.ru")
+    api_key = st.text_input("🔑 API Token", type="password", value=st.session_state.api_key, help="Токен от gen-api.ru")
+    st.session_state.api_key = api_key
     
     if api_key and st.button("🔌 Проверить подключение"):
         with st.spinner("Тест..."):
@@ -506,16 +244,11 @@ with st.sidebar:
             else:
                 st.error(test['error'])
                 if 'details' in test:
-                    st.json(test['details'])
+                    with st.expander("🔍 Детали"):
+                        st.json(test['details'])
     
     model = st.selectbox("🧠 Модель", ["qwen-3-6-plus", "qwen-3-5-plus", "qwen-max"], index=0)
-    
-    st.divider()
-    theme = st.selectbox("🎨 Тема графиков", 
-                        ['plotly_white', 'plotly', 'ggplot2', 'seaborn', 'simple_white', 'plotly_dark'])
-    
-    st.divider()
-    st.info("📁 Загрузите CSV или Excel файл")
+    st.info("📁 Поддерживаются: CSV, Excel (.xlsx)")
 
 # Загрузка файла
 uploaded_file = st.file_uploader("📁 Загрузите датасет", type=["csv", "xlsx"])
@@ -541,218 +274,179 @@ if uploaded_file:
         with st.expander("📋 Превью данных"):
             st.dataframe(df.head(10), use_container_width=True)
         
-        # === ПОЛЕ ДЛЯ КОНТЕКСТА ОТ ПОЛЬЗОВАТЕЛЯ ===
-        st.markdown("### 📝 Контекст анализа (опционально)")
-        user_context = st.text_area(
-            "На что обратить внимание?",
-            placeholder="Например: 'Интересует зависимость зарплаты от опыта работы' или 'Проверь наличие выбросов в возрасте'",
-            height=70
+        st.markdown("---")
+        
+        # === БЛОК ПРОМПТА ПОЛЬЗОВАТЕЛЯ ===
+        st.subheader("💬 Запрос к аналитику")
+        user_query = st.text_area(
+            "Опишите задачу анализа или оставьте пустым для автоматического анализа",
+            placeholder="Примеры:\n• 'Сравни среднюю зарплату по отделам'\n• 'Найди корреляции между переменными'\n• 'Есть ли выбросы в возрасте?'",
+            height=90
         )
         
-        # === КНОПКИ АНАЛИЗА ===
-        tab1, tab2 = st.tabs(["🎯 Авто-анализ", "💬 Запрос к данным"])
+        # Кнопка запуска анализа
+        run_btn = st.button("🚀 Запустить анализ", type="primary", disabled=not api_key, use_container_width=True)
         
-        with tab1:
-            st.markdown("### 🚀 Автоматический анализ датасета")
-            st.markdown("LLM сам изучит данные и построит визуализации")
+        if run_btn:
+            if not api_key or len(api_key) < 10:
+                st.error("❌ Введите валидный API токен")
+                st.stop()
             
-            if st.button("🔍 Запустить авто-анализ", type="primary", disabled=not api_key, use_container_width=True):
-                if not api_key or len(api_key) < 10:
-                    st.error("❌ Введите валидный API токен")
-                    st.stop()
+            # Авто-режим если поле пустое
+            is_auto = not user_query.strip()
+            
+            # Проверка безопасности запроса
+            is_safe, msg = check_safety(user_query if not is_auto else "auto")
+            if not is_safe:
+                st.warning(msg)
+                st.stop()
+            
+            with st.spinner("🤖 LLM анализирует данные в своём интерпретаторе..."):
+                agent = QwenAnalyticsAgent(api_key=api_key, model=model)
+                result = agent.run_analysis(user_query, df, auto_mode=is_auto)
+            
+            st.markdown("---")
+            
+            # Обработка ошибок API
+            if not result['success']:
+                st.error(f"❌ {result.get('error', 'Ошибка анализа')}")
+                if result.get('details'):
+                    with st.expander("🔍 Технические детали"):
+                        st.json(result['details'])
+            else:
+                # === 📝 ОТЧЁТ ОТ LLM (ТОЛЬКО ТЕКСТ) ===
+                st.subheader("📋 Аналитический отчёт")
                 
-                with st.spinner("🤖 AI анализирует данные..."):
-                    progress = st.progress(0)
-                    status = st.empty()
-                    
-                    agent = QwenAnalyticsAgent(api_key=api_key, model=model)
-                    
-                    progress.progress(25)
-                    status.text("Подключение к API...")
-                    
-                    test = agent.test_connection()
-                    if not test['success']:
-                        st.error(f"❌ {test['error']}")
-                        st.stop()
-                    
-                    progress.progress(50)
-                    status.text("Генерация аналитического кода...")
-                    
-                    result = agent.run_analysis(
-                        None, 
-                        df, 
-                        auto_eda=True, 
-                        theme=theme,
-                        user_context=user_context if user_context else None
-                    )
-                    
-                    progress.progress(100)
-                    status.text("✅ Готово!")
-                    time.sleep(0.5)
-                    progress.empty()
-                    status.empty()
+                # Логика анализа
+                if result.get('thought'):
+                    with st.expander("💭 Логика анализа", expanded=True):
+                        st.markdown(result['thought'])
                 
-                # Сохранение результата
-                st.session_state.auto_analysis_result = result
+                # Ключевые выводы (теги)
+                if result.get('insights'):
+                    st.markdown("**🔍 Ключевые выводы:**")
+                    for insight in result['insights']:
+                        st.markdown(f"<span class='insight-tag'>✅ {insight}</span>", unsafe_allow_html=True)
+                    st.markdown("")  # отступ
                 
-                # === ОТОБРАЖЕНИЕ ОТЧЕТА (БЕЗ КОДА!) ===
+                # Статистические метрики (текст)
+                if result.get('metrics_text'):
+                    st.markdown("**📊 Статистические метрики:**")
+                    st.markdown(f"<div class='metrics-block'>{result['metrics_text']}</div>", unsafe_allow_html=True)
+                
+                # Бизнес-интерпретация
+                if result.get('explanation'):
+                    st.info(f"💡 **Интерпретация:** {result['explanation']}")
+                
+                # === 📈 АВТОМАТИЧЕСКАЯ ВИЗУАЛИЗАЦИЯ (БЕЗ LLM, ТОЛЬКО STREAMLIT) ===
                 st.markdown("---")
+                st.subheader("📈 Автоматическая визуализация данных")
+                st.caption("Графики построены автоматически через Plotly — независимо от LLM")
                 
-                if not result['success']:
-                    st.error(f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}")
-                    if result.get('details'):
-                        with st.expander("🔍 Технические детали"):
-                            st.json(result['details'])
-                else:
-                    # Заголовок отчета
-                    st.markdown("## 📊 Отчет по анализу данных")
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                cat_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
+                
+                # Визуализации для числовых переменных
+                if numeric_cols:
+                    st.markdown("#### 🔢 Числовые переменные")
                     
-                    # Рассуждения агента
-                    if result.get('thought'):
-                        with st.expander("💭 Логика анализа", expanded=True):
-                            st.markdown(result['thought'])
-                    
-                    # Текстовые выводы
-                    if result.get('output'):
-                        st.markdown("### 🔍 Ключевые выводы")
-                        for line in result['output']:
-                            st.markdown(f"• {line}")
-                    
-                    # Графики
-                    if result.get('figures'):
-                        st.markdown("### 📈 Визуализации")
+                    if len(numeric_cols) >= 2:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            # Гистограмма с выбором колонки
+                            chart_col = st.selectbox("📊 Колонка для гистограммы", numeric_cols, key="hist_select")
+                            fig_hist = px.histogram(
+                                df, x=chart_col, 
+                                title=f"Распределение: {chart_col}",
+                                labels={'x': chart_col, 'y': 'Количество'},
+                                nbins=30
+                            )
+                            st.plotly_chart(fig_hist, use_container_width=True)
                         
-                        if len(result['figures']) > 1:
-                            tabs = st.tabs([f"График {i+1}" for i in range(len(result['figures']))])
-                            for idx, (tab, fig) in enumerate(zip(tabs, result['figures'])):
-                                with tab:
-                                    st.plotly_chart(fig, use_container_width=True, key=f"fig_{idx}")
-                                    
-                                    # Экспорт
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        png = download_plotly_fig(fig, f"plot_{idx+1}", 'png')
-                                        if png:
-                                            st.download_button("📥 PNG", base64.b64decode(png), 
-                                                             f"plot_{idx+1}.png", "image/png")
-                                    with col2:
-                                        html_data = download_plotly_fig(fig, f"plot_{idx+1}", 'html')
-                                        if html_data:
-                                            st.download_button("🌐 HTML", base64.b64decode(html_data),
-                                                             f"plot_{idx+1}.html", "text/html")
-                        else:
-                            st.plotly_chart(result['figures'][0], use_container_width=True)
+                        with col2:
+                            # Корреляционная матрица
+                            corr_cols = numeric_cols[:10]  # ограничиваем для читаемости
+                            corr_matrix = df[corr_cols].corr(numeric_only=True)
+                            fig_corr = px.imshow(
+                                corr_matrix, 
+                                text_auto=True, 
+                                title="Корреляционная матрица",
+                                color_continuous_scale='RdBu_r',
+                                aspect='auto'
+                            )
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                    elif len(numeric_cols) == 1:
+                        fig_hist = px.histogram(df, x=numeric_cols[0], title=f"Распределение: {numeric_cols[0]}")
+                        st.plotly_chart(fig_hist, use_container_width=True)
                     
-                    # Табличные результаты
-                    if result.get('data_result') is not None:
-                        st.markdown("### 📋 Статистика")
-                        if isinstance(result['data_result'], pd.DataFrame):
-                            st.dataframe(result['data_result'], use_container_width=True)
-                            csv = result['data_result'].to_csv(index=False)
-                            st.download_button("📥 Скачать CSV", csv, "statistics.csv", "text/csv")
-                        else:
-                            st.write(result['data_result'])
-                    
-                    # Интерпретация
-                    if result.get('explanation'):
-                        st.info(f"💡 **Интерпретация:** {result['explanation']}")
-                    
-                    # Рекомендации
-                    if result.get('recommendations'):
-                        st.markdown("### 🔄 Что ещё изучить?")
-                        for rec in result['recommendations']:
-                            st.markdown(f"• {rec}")
-        
-        with tab2:
-            st.markdown("### 💬 Анализ по вашему запросу")
-            
-            query = st.text_area(
-                "Ваш запрос",
-                placeholder="Например:\n• Построй гистограмму распределения возраста\n• Сравни среднюю зарплату по отделам\n• Найди корреляции между переменными",
-                height=100
-            )
-            
-            if st.button("🚀 Выполнить анализ", type="primary", disabled=not (api_key and query)):
-                if not api_key or len(api_key) < 10:
-                    st.error("❌ Введите валидный API токен")
-                    st.stop()
+                    # Box plot для сравнения по категориям
+                    if cat_cols and len(numeric_cols) >= 1:
+                        st.markdown("#### 📦 Box plot: сравнение по категориям")
+                        box_cat = st.selectbox("Категория для группировки", cat_cols, key="box_cat_select")
+                        box_num = st.selectbox("Числовая переменная", numeric_cols, key="box_num_select")
+                        
+                        if df[box_cat].nunique() <= 15:  # чтобы не перегружать
+                            fig_box = px.box(
+                                df, x=box_cat, y=box_num,
+                                title=f"Распределение '{box_num}' по '{box_cat}'",
+                                points='outliers'
+                            )
+                            st.plotly_chart(fig_box, use_container_width=True)
                 
-                # Проверка безопасности
-                is_safe, msg = check_safety(query)
-                if not is_safe:
-                    st.warning(msg)
-                    st.stop()
+                # Визуализации для категориальных переменных
+                if cat_cols:
+                    st.markdown("#### 🏷️ Категориальные переменные")
+                    for col in cat_cols[:3]:  # максимум 3, чтобы не перегрузить
+                        if df[col].nunique() <= 20 and df[col].nunique() >= 2:
+                            counts = df[col].value_counts()
+                            fig_bar = px.bar(
+                                x=counts.index, y=counts.values,
+                                title=f"Распределение: {col}",
+                                labels={'x': col, 'y': 'Количество'},
+                                color=counts.index,
+                                color_discrete_sequence=px.colors.qualitative.Set2
+                            )
+                            fig_bar.update_layout(showlegend=False)
+                            st.plotly_chart(fig_bar, use_container_width=True)
                 
-                with st.spinner("🤖 Выполнение анализа..."):
-                    agent = QwenAnalyticsAgent(api_key=api_key, model=model)
-                    
-                    result = agent.run_analysis(
-                        query, 
-                        df, 
-                        auto_eda=False, 
-                        theme=theme,
-                        user_context=user_context if user_context else None
-                    )
+                # Если нет подходящих данных
+                if not numeric_cols and not cat_cols:
+                    st.info("ℹ️ В датасете нет столбцов, подходящих для автоматической визуализации")
                 
-                st.markdown("---")
-                
-                if not result['success']:
-                    st.error(f"❌ {result.get('error', 'Ошибка')}")
-                    if result.get('details'):
-                        with st.expander("🔍 Детали"):
-                            st.json(result['details'])
-                else:
-                    st.markdown("## 📊 Результат анализа")
-                    
-                    if result.get('thought'):
-                        with st.expander("💭 Логика", expanded=True):
-                            st.markdown(result['thought'])
-                    
-                    if result.get('output'):
-                        st.markdown("### 📤 Вывод")
-                        for line in result['output']:
-                            st.markdown(f"• {line}")
-                    
-                    if result.get('data_result') is not None:
-                        st.markdown("### 📋 Результаты")
-                        if isinstance(result['data_result'], pd.DataFrame):
-                            st.dataframe(result['data_result'], use_container_width=True)
-                        else:
-                            st.write(result['data_result'])
-                    
-                    if result.get('figures'):
-                        st.markdown("### 📈 Графики")
-                        for idx, fig in enumerate(result['figures']):
-                            st.plotly_chart(fig, use_container_width=True, key=f"manual_fig_{idx}")
-                    
-                    if result.get('explanation'):
-                        st.info(f"💡 {result['explanation']}")
+                # Кнопки экспорта (опционально)
+                if numeric_cols or cat_cols:
+                    st.markdown("*💡 Совет: нажмите на график для интерактивного изучения. Используйте лупу для приближения.*")
     
     except Exception as e:
-        st.error(f"❌ Ошибка: {type(e).__name__}: {e}")
-        with st.expander("🔍 Traceback"):
-            st.code(traceback.format_exc())
+        st.error(f"❌ Ошибка обработки: {type(e).__name__}: {e}")
+        with st.expander("🔍 Traceback для разработчика"):
+            st.code(traceback.format_exc(), language='python')
 else:
     # Стартовый экран
     st.info("👆 **Загрузите CSV или Excel файл** для начала анализа")
     
-    st.markdown("### 💡 Примеры использования:")
-    examples = [
-        ("📊 Авто-анализ", "Нажмите 'Запустить авто-анализ' — AI сам изучит все данные"),
-        ("📈 Гистограмма", "В запросе: 'Построй гистограмму распределения столбца age'"),
-        ("🔗 Корреляции", "В запросе: 'Найди корреляции между salary и experience'"),
-        ("📊 Группировка", "В запросе: 'Сравни среднюю зарплату по отделам'")
+    st.markdown("### 💡 Как это работает:")
+    steps = [
+        ("1️⃣", "Загрузите датасет (CSV/Excel)"),
+        ("2️⃣", "Введите запрос к аналитику или оставьте пустым для авто-анализа"),
+        ("3️⃣", "LLM на gen-api.ru запускает код в своём интерпретаторе и анализирует данные"),
+        ("4️⃣", "Вы получаете текстовый отчёт с выводами и метриками"),
+        ("5️⃣", "Streamlit автоматически строит интерактивные графики через Plotly")
     ]
+    for num, desc in steps:
+        st.markdown(f"{num} {desc}")
     
-    for title, desc in examples:
-        st.markdown(f"**{title}**: {desc}")
-    
-    st.markdown("### 🎯 Возможности:")
-    cols = st.columns(3)
-    cols[0].markdown("📊 **Визуализации**\n• Интерактивные графики Plotly\n• Экспорт в PNG/HTML\n• Автоматический подбор типов")
-    cols[1].markdown("🔒 **Безопасность**\n• Многоуровневая проверка кода\n• Защита от prompt-injection\n• Песочница для выполнения")
-    cols[2].markdown("🤖 **AI-агент**\n• Генерация кода на естественном языке\n• Объяснение результатов\n• Рекомендации по анализу")
+    st.markdown("### 🎯 Примеры запросов:")
+    examples = [
+        "Сравни среднюю зарплату по отделам",
+        "Найди корреляции между числовыми переменными",
+        "Есть ли выбросы в столбце age?",
+        "Какие категории встречаются чаще всего?",
+        "Построй описательную статистику"
+    ]
+    for ex in examples:
+        st.markdown(f"• `{ex}`")
 
 # Футер
 st.markdown("---")
-st.caption("🤖 AI Analytics Agent | Qwen3.6 • gen-api.ru | Данные обрабатываются локально")
+st.caption("🤖 AI Analytics Agent | Qwen3.6 • gen-api.ru | Данные не покидают ваш браузер после загрузки")
