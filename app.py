@@ -15,9 +15,10 @@ import ast
 from contextlib import redirect_stdout, redirect_stderr
 import time
 from typing import Optional, Union, List
+from datetime import datetime
 
 # OpenAI-compatible client для Qwen
-from openai import OpenAI
+from openai import OpenAI, APIError, AuthenticationError, RateLimitError
 
 # Отключаем предупреждения SSL
 try:
@@ -28,9 +29,8 @@ else:
     ssl._create_default_https_context = _create_unverified_https_context
 os.environ["CURL_CA_BUNDLE"] = ""
 
-# Настройки Plotly для Streamlit
+# Настройки Plotly
 px.defaults.template = "plotly_white"
-go.Figure.update_layout = lambda self, **kwargs: go.Figure.update_layout(self, **kwargs)
 
 # Запрещённые модули
 FORBIDDEN_MODULES = {
@@ -42,9 +42,7 @@ FORBIDDEN_BUILTINS = {'eval', 'exec', 'compile', 'import', 'open', 'input'}
 
 
 class SafeCodeExecutor:
-    """Безопасный исполнитель кода с улучшенной поддержкой визуализаций"""
-    
-    PLOTLY_TEMPLATES = ['plotly', 'ggplot2', 'seaborn', 'simple_white', 'plotly_white', 'plotly_dark']
+    """Безопасный исполнитель кода"""
     
     def __init__(self, df: pd.DataFrame, timeout: int = 30, theme: str = 'plotly_white'):
         self.df = df.copy()
@@ -55,7 +53,7 @@ class SafeCodeExecutor:
         px.defaults.template = theme
 
     def _safe_globals(self):
-        """Безопасное окружение с расширенными возможностями визуализации"""
+        """Безопасное окружение"""
         allowed_modules = {
             'pd': pd, 'pandas': pd,
             'np': np, 'numpy': np,
@@ -80,38 +78,40 @@ class SafeCodeExecutor:
         }
 
     def _normalize_figure(self, fig) -> go.Figure:
-        """Приведение фигуры к стандартному формату Plotly"""
+        """Приведение фигуры к стандартному формату"""
         if isinstance(fig, go.Figure):
             fig.update_layout(template=self.theme, height=500, margin=dict(l=40, r=40, t=40, b=40))
             return fig
         elif hasattr(fig, 'to_plotly_json'):
             return go.Figure(fig)
         else:
-            # Попытка создать фигуру из данных
             try:
                 return go.Figure(data=fig)
             except:
                 return None
 
     def _save_fig_callback(self, fig, filename: str = "plot", title: str = None, **layout_kwargs):
-        """Сохранение графика с настройками оформления"""
-        normalized = self._normalize_figure(fig)
-        if normalized:
-            if title:
-                normalized.update_layout(title={'text': title, 'x': 0.5, 'xanchor': 'center'})
-            if layout_kwargs:
-                normalized.update_layout(**layout_kwargs)
-            self.figures.append({'fig': normalized, 'name': filename, 'title': title})
-            return f"✅ График '{filename}' создан"
-        return "❌ Ошибка создания графика"
+        """Сохранение графика"""
+        try:
+            normalized = self._normalize_figure(fig)
+            if normalized:
+                if title:
+                    normalized.update_layout(title={'text': title, 'x': 0.5, 'xanchor': 'center'})
+                if layout_kwargs:
+                    normalized.update_layout(**layout_kwargs)
+                self.figures.append({'fig': normalized, 'name': filename, 'title': title})
+                return f"✅ График '{filename}' создан"
+            return "❌ Ошибка создания графика"
+        except Exception as e:
+            return f"❌ Ошибка при сохранении графика: {str(e)}"
 
     def _display_fig_callback(self, fig, title: str = None):
-        """Алиас для save_fig с акцентом на отображение"""
+        """Алиас для save_fig"""
         return self._save_fig_callback(fig, filename=f"viz_{len(self.figures)+1}", title=title)
 
     def _create_dashboard_callback(self, figs: List, titles: List[str] = None, 
                                   subplot_titles: List[str] = None, rows: int = None, cols: int = None):
-        """Создание дашборда из нескольких графиков"""
+        """Создание дашборда"""
         if not figs:
             return "❌ Нет графиков для дашборда"
         
@@ -147,7 +147,7 @@ class SafeCodeExecutor:
         return self._save_fig_callback(dashboard, filename="dashboard", title="Аналитический дашборд")
 
     def _validate_code(self, code: str) -> tuple:
-        """Проверка кода с улучшенной обработкой"""
+        """Проверка кода"""
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
@@ -171,8 +171,8 @@ class SafeCodeExecutor:
         return True, "OK"
 
     def execute(self, code: str) -> dict:
-        """Выполнение кода с улучшенной обработкой результатов"""
-        result = {'success': False, 'output': [], 'error': None, 'figures': [], 'data_result': None}
+        """Выполнение кода"""
+        result = {'success': False, 'output': [], 'error': None, 'figures': [], 'data_result': None, 'debug_info': {}}
 
         is_valid, message = self._validate_code(code)
         if not is_valid:
@@ -183,11 +183,13 @@ class SafeCodeExecutor:
             safe_globals = self._safe_globals()
             local_vars = {}
 
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            stdout_capture = StringIO()
+            stderr_capture = StringIO()
+            
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
                 exec(code, safe_globals, local_vars)
 
             result['output'] = self.output
-            # Извлекаем только фигуры, а не словари
             result['figures'] = [item['fig'] if isinstance(item, dict) and 'fig' in item else item 
                                 for item in self.figures if isinstance(item, (go.Figure, dict))]
             
@@ -195,28 +197,124 @@ class SafeCodeExecutor:
                 result['data_result'] = local_vars['result']
             elif 'df_result' in local_vars:
                 result['data_result'] = local_vars['df_result']
+            
+            result['debug_info']['stdout'] = stdout_capture.getvalue()
+            result['debug_info']['stderr'] = stderr_capture.getvalue()
             result['success'] = True
 
         except Exception as e:
-            result['error'] = f"Ошибка: {type(e).__name__}: {str(e)}"
+            result['error'] = f"Ошибка выполнения: {type(e).__name__}: {str(e)}"
             result['traceback'] = traceback.format_exc()
+            result['debug_info']['exception_type'] = type(e).__name__
+            result['debug_info']['exception_msg'] = str(e)
 
         return result
 
 
 class QwenAnalyticsAgent:
-    """Агент на Qwen3.6-Plus с улучшенными промптами для визуализации"""
+    """Агент с улучшенной обработкой ошибок API"""
     
     def __init__(self, api_key: str, model: str = "qwen3.6-plus"):
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-        )
+        self.api_key = api_key
         self.model = model
         self.df_info = None
+        self.api_errors = []
+        self.request_history = []
+        
+        # Инициализация клиента с проверкой
+        try:
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                timeout=30.0  # Таймаут 30 секунд
+            )
+            self.client_initialized = True
+        except Exception as e:
+            self.client = None
+            self.client_initialized = False
+            self.init_error = str(e)
+
+    def test_connection(self) -> dict:
+        """Тестирование подключения к API"""
+        if not self.client_initialized:
+            return {
+                'success': False,
+                'error': f"Не удалось инициализировать клиент: {getattr(self, 'init_error', 'Неизвестная ошибка')}",
+                'details': {
+                    'api_key_set': bool(self.api_key),
+                    'api_key_length': len(self.api_key) if self.api_key else 0,
+                    'client_initialized': False
+                }
+            }
+        
+        try:
+            # Пробный запрос с минимальными токенами
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+                temperature=0
+            )
+            return {
+                'success': True,
+                'error': None,
+                'details': {
+                    'api_key_set': bool(self.api_key),
+                    'api_key_length': len(self.api_key) if self.api_key else 0,
+                    'client_initialized': True,
+                    'model': self.model,
+                    'response_received': True,
+                    'timestamp': datetime.now().isoformat()
+                }
+            }
+        except AuthenticationError as e:
+            return {
+                'success': False,
+                'error': "❌ Ошибка аутентификации",
+                'details': {
+                    'error_type': 'AuthenticationError',
+                    'message': str(e),
+                    'possible_causes': [
+                        "Неверный API ключ",
+                        "Ключ истёк",
+                        "Ключ не активирован",
+                        "Неправильный формат ключа"
+                    ]
+                }
+            }
+        except RateLimitError as e:
+            return {
+                'success': False,
+                'error': "⏱ Превышен лимит запросов",
+                'details': {
+                    'error_type': 'RateLimitError',
+                    'message': str(e),
+                    'possible_causes': [
+                        "Превышен дневной лимит",
+                        "Превышен лимит запросов в минуту",
+                        "Недостаточно токенов на счёте"
+                    ]
+                }
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"❌ Ошибка подключения: {type(e).__name__}",
+                'details': {
+                    'error_type': type(e).__name__,
+                    'message': str(e),
+                    'traceback': traceback.format_exc(),
+                    'possible_causes': [
+                        "Проблемы с интернет-соединением",
+                        "API сервер недоступен",
+                        "Неверный URL API",
+                        "Брандмауэр блокирует соединение"
+                    ]
+                }
+            }
 
     def prepare_dataset_context(self, df: pd.DataFrame):
-        """Подготовка контекста данных с примерами визуализаций"""
+        """Подготовка контекста данных"""
         numeric_cols = df.select_dtypes(include='number').columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
         
@@ -224,51 +322,39 @@ class QwenAnalyticsAgent:
             'shape': df.shape,
             'columns': df.columns.tolist(),
             'dtypes': df.dtypes.astype(str).to_dict(),
-            'numeric_cols': numeric_cols,
-            'categorical_cols': categorical_cols,
+            'numeric_cols': numeric_cols[:10],  # Первые 10
+            'categorical_cols': categorical_cols[:10],
             'sample': df.head(2).to_dict(orient='records'),
-            'missing': df.isnull().sum().to_dict(),
-            'suggested_charts': self._suggest_charts(df, numeric_cols, categorical_cols)
+            'missing': {k: int(v) for k, v in df.isnull().sum().items() if v > 0}
         }
 
-    def _suggest_charts(self, df: pd.DataFrame, numeric: List[str], categorical: List[str]) -> List[dict]:
-        """Генерация рекомендаций по визуализации"""
-        suggestions = []
-        if numeric and categorical:
-            suggestions.append({'type': 'bar', 'x': categorical[0], 'y': numeric[0], 'desc': f'Столбчатая диаграмма: {numeric[0]} по {categorical[0]}'})
-            suggestions.append({'type': 'box', 'x': categorical[0], 'y': numeric[0], 'desc': f'Box plot: распределение {numeric[0]}'})
-        if len(numeric) >= 2:
-            suggestions.append({'type': 'scatter', 'x': numeric[0], 'y': numeric[1], 'desc': f'Scatter plot: {numeric[0]} vs {numeric[1]}'})
-        if categorical:
-            suggestions.append({'type': 'pie' if len(df[categorical[0]].unique()) <= 10 else 'bar', 
-                               'names': categorical[0], 'desc': f'Распределение: {categorical[0]}'})
-        if numeric:
-            suggestions.append({'type': 'histogram', 'x': numeric[0], 'desc': f'Гистограмма: {numeric[0]}'})
-        return suggestions[:5]
-
-    def generate_code(self, user_query: str, auto_eda: bool = False) -> str:
-        """Генерация кода с акцентом на визуализацию"""
+    def generate_code(self, user_query: str, auto_eda: bool = False) -> dict:
+        """Генерация кода с полной информацией об ошибках"""
         system_prompt = """Ты эксперт по визуализации данных. Отвечай ТОЛЬКО JSON:
 {
-"thought": "краткое рассуждение о подходе",
-"code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import! Используй: df, save_fig(fig, 'name', title='...'), display_fig(), print()",
-"explanation": "что покажут графики и как интерпретировать"
+"thought": "краткое рассуждение",
+"code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import!",
+"explanation": "что покажут графики"
 }
 
-ПРАВИЛА для графиков:
-1. Всегда вызывай save_fig(fig, 'unique_name', title='Заголовок') для каждого графика
+ПРАВИЛА:
+1. Всегда вызывай save_fig(fig, 'unique_name', title='...')
 2. Используй px для быстрых графиков, go для кастомных
-3. Добавляй подписи осей: labels={'x': '...', 'y': '...'}
-4. Для нескольких графиков используй create_dashboard([fig1, fig2], titles=['A', 'B'])
-5. result = df.groupby(...).agg(...) для табличных результатов"""
+3. result = df.groupby(...).agg(...) для табличных результатов"""
 
-        context = "AUTO_EDA MODE: " if auto_eda else ""
-        context += f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
-        
-        if auto_eda:
-            context += "\n\nСоздай комплексную визуализацию: 1) распределения числовых переменных, 2) корреляционную матрицу если >1 числового столбца, 3) бар-чарты для категориальных, 4) scatter plot для пар числовых"
+        context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
+
+        request_info = {
+            'timestamp': datetime.now().isoformat(),
+            'query': user_query,
+            'model': self.model,
+            'auto_eda': auto_eda
+        }
 
         try:
+            if not self.client_initialized:
+                raise Exception(f"Клиент не инициализирован: {getattr(self, 'init_error', 'Unknown')}")
+            
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -279,20 +365,112 @@ class QwenAnalyticsAgent:
                 max_tokens=2500,
                 response_format={"type": "json_object"}
             )
-            return response.choices[0].message.content
+            
+            request_info['response_tokens'] = response.usage.completion_tokens if hasattr(response, 'usage') else None
+            request_info['success'] = True
+            
+            self.request_history.append(request_info)
+            
+            return {
+                'success': True,
+                'content': response.choices[0].message.content,
+                'usage': {
+                    'prompt_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') else None,
+                    'completion_tokens': response.usage.completion_tokens if hasattr(response, 'usage') else None
+                }
+            }
+            
+        except AuthenticationError as e:
+            error_info = {
+                'type': 'AuthenticationError',
+                'message': str(e),
+                'details': 'Неверный API ключ или ключ не активен'
+            }
+            request_info['error'] = error_info
+            self.request_history.append(request_info)
+            self.api_errors.append(error_info)
+            
+            return {
+                'success': False,
+                'error_type': 'AuthenticationError',
+                'message': 'Ошибка аутентификации. Проверьте API ключ.',
+                'details': str(e),
+                'raw_response': None
+            }
+            
+        except RateLimitError as e:
+            error_info = {
+                'type': 'RateLimitError',
+                'message': str(e),
+                'details': 'Превышен лимит запросов'
+            }
+            request_info['error'] = error_info
+            self.request_history.append(request_info)
+            self.api_errors.append(error_info)
+            
+            return {
+                'success': False,
+                'error_type': 'RateLimitError',
+                'message': 'Превышен лимит запросов. Подождите немного.',
+                'details': str(e),
+                'raw_response': None
+            }
+            
         except Exception as e:
-            return json.dumps({"error": str(e), "code": "print('Ошибка API')", "explanation": "Попробуйте повторить запрос"})
+            error_info = {
+                'type': type(e).__name__,
+                'message': str(e),
+                'traceback': traceback.format_exc()
+            }
+            request_info['error'] = error_info
+            self.request_history.append(request_info)
+            self.api_errors.append(error_info)
+            
+            return {
+                'success': False,
+                'error_type': type(e).__name__,
+                'message': f'Ошибка API: {type(e).__name__}',
+                'details': str(e),
+                'traceback': traceback.format_exc(),
+                'raw_response': None
+            }
 
     def run_analysis(self, user_query: str, df: pd.DataFrame, auto_eda: bool = False, theme: str = 'plotly_white') -> dict:
-        """Запуск анализа с поддержкой тем оформления"""
+        """Запуск анализа"""
         self.prepare_dataset_context(df)
-        plan_response = self.generate_code(user_query, auto_eda)
-
+        
+        # Генерация кода
+        gen_result = self.generate_code(user_query, auto_eda)
+        
+        if not gen_result['success']:
+            return {
+                'success': False,
+                'stage': 'api_call',
+                'error': gen_result['message'],
+                'error_type': gen_result.get('error_type'),
+                'details': gen_result.get('details'),
+                'traceback': gen_result.get('traceback'),
+                'api_diagnostics': {
+                    'model': self.model,
+                    'api_key_length': len(self.api_key) if self.api_key else 0,
+                    'client_initialized': self.client_initialized
+                }
+            }
+        
+        # Парсинг ответа
         try:
-            plan = json.loads(plan_response)
-        except:
-            match = re.search(r'\{[\s\S]*\}', plan_response)
-            plan = json.loads(match.group()) if match else {"error": "Parse error", "code": "print('Error')"}
+            plan = json.loads(gen_result['content'])
+        except json.JSONDecodeError as e:
+            match = re.search(r'\{[\s\S]*\}', gen_result['content'])
+            if match:
+                try:
+                    plan = json.loads(match.group())
+                except:
+                    plan = {"error": "Parse error", "code": "print('Error parsing response')"}
+            else:
+                plan = {"error": "No JSON found", "code": "print('Error')"}
+        except Exception as e:
+            plan = {"error": f"Parse error: {str(e)}", "code": "print('Error')"}
 
         code = plan.get('code', '')
         executor = SafeCodeExecutor(df, theme=theme)
@@ -300,6 +478,7 @@ class QwenAnalyticsAgent:
 
         return {
             'success': exec_result['success'],
+            'stage': 'execution',
             'thought': plan.get('thought', ''),
             'explanation': plan.get('explanation', ''),
             'code': code,
@@ -307,12 +486,15 @@ class QwenAnalyticsAgent:
             'figures': exec_result['figures'],
             'data_result': exec_result['data_result'],
             'error': exec_result.get('error'),
-            'traceback': exec_result.get('traceback')
+            'traceback': exec_result.get('traceback'),
+            'debug_info': exec_result.get('debug_info', {}),
+            'api_usage': gen_result.get('usage'),
+            'full_llm_response': gen_result['content']  # Полный ответ от LLM
         }
 
 
 def check_safety(query: str) -> tuple:
-    """Проверка безопасности запроса"""
+    """Проверка безопасности"""
     forbidden = [r'eval\s*\(', r'exec\s*\(', r'import\s+', r'os\.system', r'__']
     for pattern in forbidden:
         if re.search(pattern, query, re.IGNORECASE):
@@ -320,43 +502,58 @@ def check_safety(query: str) -> tuple:
     return True, "✅ Безопасно"
 
 
-def download_plotly_fig(fig, filename: str, format: str = 'png'):
-    """Конвертация Plotly фигуры для скачивания"""
-    try:
-        if format == 'png':
-            img_bytes = fig.to_image(format="png", width=1200, height=600, scale=2)
-            return base64.b64encode(img_bytes).decode()
-        elif format == 'html':
-            html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-            return base64.b64encode(html.encode()).decode()
-    except Exception as e:
-        st.warning(f"⚠️ Не удалось экспортировать график: {e}")
-    return None
-
-
 # ================= UI =================
-st.set_page_config(page_title="AI Analytics Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="🤖 AI Analytics Pro", page_icon="📊", layout="wide")
 
-# Кастомные стили для визуализаций
 st.markdown("""
 <style>
     .stPlotlyChart {border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);}
-    .stTabs [data-baseweb="tab-list"] {gap: 8px;}
-    .stTabs [data-baseweb="tab"] {padding: 8px 16px; border-radius: 5px 5px 0 0;}
+    .error-box {background-color: #ffebee; padding: 10px; border-radius: 5px; border-left: 4px solid #f44336;}
+    .warning-box {background-color: #fff3e0; padding: 10px; border-radius: 5px; border-left: 4px solid #ff9800;}
+    .success-box {background-color: #e8f5e9; padding: 10px; border-radius: 5px; border-left: 4px solid #4caf50;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🤖 AI Analytics Agent Pro")
-st.markdown("*Интеллектуальный анализ данных с автоматической визуализацией на Qwen3.6-Plus*")
+st.title("AI Analytics Agent Pro")
+st.markdown("*Интеллектуальный анализ данных с детальной диагностикой*")
+
+# Инициализация session state
+if 'analysis_history' not in st.session_state:
+    st.session_state.analysis_history = []
+if 'api_errors_log' not in st.session_state:
+    st.session_state.api_errors_log = []
 
 with st.sidebar:
     st.header("⚙️ Настройки")
     
-    api_key = st.text_input("🔑 DashScope API Key", type="password", help="Получите ключ на dashscope.aliyun.com")
-    if api_key and len(api_key) > 10:
-        st.success("✅ Ключ сохранён")
+    api_key = st.text_input("🔑 DashScope API Key", type="password", 
+                           help="Получите ключ на dashscope.aliyun.com")
     
-    model = st.selectbox("🧠 Модель", ["qwen3.6-plus", "qwen3.5-plus", "qwen-max"], index=0)
+    if api_key:
+        # Кнопка тестирования подключения
+        if st.button("🔌 Проверить подключение к API", type="secondary"):
+            with st.spinner("Тестирование..."):
+                test_agent = QwenAnalyticsAgent(api_key=api_key, model=st.session_state.get('selected_model', 'qwen3.6-plus'))
+                test_result = test_agent.test_connection()
+                
+                if test_result['success']:
+                    st.success("✅ Подключение успешно!")
+                    st.json(test_result['details'])
+                else:
+                    st.error(test_result['error'])
+                    st.warning("🔍 Детали:")
+                    st.json(test_result.get('details', {}))
+                    
+                    if 'possible_causes' in test_result.get('details', {}):
+                        st.info("💡 Возможные причины:")
+                        for cause in test_result['details']['possible_causes']:
+                            st.markdown(f"• {cause}")
+        
+        if len(api_key) > 10:
+            st.success("✅ Ключ введён")
+    
+    model = st.selectbox("🧠 Модель", ["qwen3.6-plus", "qwen3.5-plus", "qwen-max"], 
+                        index=0, key='selected_model')
     
     st.divider()
     
@@ -364,12 +561,21 @@ with st.sidebar:
     st.subheader("🎨 Визуализация")
     theme = st.selectbox("Тема графиков", 
                         ['plotly_white', 'plotly', 'ggplot2', 'seaborn', 'simple_white', 'plotly_dark'],
-                        index=0, help="Влияет на стиль всех создаваемых графиков")
-    
-    auto_height = st.checkbox("📐 Авто-высота графиков", value=True)
-    default_height = st.slider("Высота графика (px)", 300, 1000, 500) if not auto_height else 500
+                        index=0)
     
     st.divider()
+    
+    # Диагностика
+    st.subheader("🔍 Диагностика")
+    if st.button("📋 Показать историю ошибок API"):
+        if st.session_state.api_errors_log:
+            st.error(f"Всего ошибок: {len(st.session_state.api_errors_log)}")
+            for idx, err in enumerate(st.session_state.api_errors_log[-5:], 1):
+                with st.expander(f"Ошибка #{len(st.session_state.api_errors_log) - 5 + idx}"):
+                    st.json(err)
+        else:
+            st.success("Ошибок не зафиксировано")
+    
     st.info("📁 Поддерживаемые форматы: CSV, Excel (.xlsx)")
 
 # Загрузка данных
@@ -377,7 +583,6 @@ uploaded_file = st.file_uploader("📁 Загрузите файл с данны
 
 if uploaded_file:
     try:
-        # Чтение файла
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
@@ -393,172 +598,173 @@ if uploaded_file:
         col4.metric("🏷️ Категориальных", len(df.select_dtypes(include=['object', 'category', 'bool']).columns))
         col5.metric("⚠️ Пропусков", df.isnull().sum().sum())
         
-        # Превью данных
         with st.expander("📋 Превью данных", expanded=False):
             st.dataframe(df.head(10), use_container_width=True)
-            st.caption("Типы данных:")
-            st.code(df.dtypes.astype(str).to_dict(), language='python')
         
-        # Режим анализа
-        tab1, tab2 = st.tabs(["🔍 Ручной запрос", "⚡ Авто-анализ (EDA)"])
+        # Запрос
+        query = st.text_area("💬 Ваш запрос к данным", 
+                           placeholder="Примеры:\n• Построй гистограмму распределения столбца 'age'\n• Сравни средние значения 'salary' по группам 'department'", 
+                           height=100)
         
-        with tab1:
-            query = st.text_area("💬 Ваш запрос к данным", 
-                               placeholder="Примеры:\n• Построй гистограмму распределения столбца 'age'\n• Сравни средние значения 'salary' по группам 'department'\n• Найди корреляции между числовыми переменными", 
-                               height=100)
-        
-        with tab2:
-            st.markdown("### 🚀 Быстрый исследовательский анализ")
-            st.markdown("Автоматически создаст набор визуализаций:")
-            eda_features = st.multiselect(
-                "Выберите типы графиков:",
-                ["📊 Гистограммы числовых переменных", 
-                 "📈 Корреляционная матрица", 
-                 "🥧 Распределение категориальных", 
-                 "🔗 Scatter plot пар переменных",
-                 "📦 Box plot для выбросов"],
-                default=["📊 Гистограммы числовых переменных", "📈 Корреляционная матрица"]
-            )
-            run_eda = st.button("🎯 Запустить авто-анализ", type="primary", use_container_width=True)
-        
-        # Кнопка выполнения
-        run_analysis = st.button("🚀 Выполнить анализ", type="primary", use_container_width=True, 
-                                disabled=not (api_key and (query or run_eda)))
-        
-        if run_analysis or run_eda:
-            current_query = "Создай комплексную визуализацию: " + ", ".join(eda_features) if run_eda else query
-            is_safe, msg = check_safety(current_query)
+        if st.button("🚀 Выполнить анализ", type="primary", 
+                    disabled=not (api_key and query)):
             
+            if not api_key:
+                st.error("❌ Введите API ключ")
+                st.stop()
+            
+            if len(api_key) < 10:
+                st.error("❌ API ключ слишком короткий")
+                st.stop()
+            
+            is_safe, msg = check_safety(query)
             if not is_safe:
                 st.warning(msg)
                 st.stop()
             
             with st.spinner("🤖 Генерация кода и выполнение анализа..."):
-                agent = QwenAnalyticsAgent(api_key=api_key, model=model)
-                result = agent.run_analysis(current_query, df, auto_eda=run_eda, theme=theme)
-                
-                st.markdown("---")
-                
-                # Обработка ошибок
-                if result.get('error'):
-                    st.error(f"❌ {result['error']}")
-                    if result.get('traceback'):
-                        with st.expander("🔍 Детали ошибки"):
-                            st.code(result['traceback'], language='python')
-                else:
-                    # Мысли агента
-                    if result.get('thought'):
-                        with st.expander("💭 Ход рассуждений агента", expanded=True):
-                            st.markdown(result['thought'])
+                try:
+                    agent = QwenAnalyticsAgent(api_key=api_key, model=model)
                     
-                    # Сгенерированный код
-                    with st.expander("📝 Сгенерированный код", expanded=st.session_state.get('show_code', False)):
-                        st.code(result['code'], language='python')
-                        st.caption("💡 Совет: Вы можете скопировать этот код и модифицировать его под свои нужды")
-                    
-                    # Текстовый вывод
-                    if result.get('output'):
-                        with st.expander("📤 Консольный вывод", expanded=True):
-                            for line in result['output']:
-                                st.text(line)
-                    
-                    # Табличные результаты
-                    if result.get('data_result') is not None:
-                        st.markdown("### 📋 Результаты вычислений")
-                        if isinstance(result['data_result'], pd.DataFrame):
-                            st.dataframe(result['data_result'], use_container_width=True)
-                            # Кнопка скачивания
-                            csv = result['data_result'].to_csv(index=False, encoding='utf-8-sig')
-                            st.download_button("📥 Скачать CSV", data=csv, 
-                                             file_name="result.csv", mime="text/csv")
-                        else:
-                            st.json(result['data_result'] if isinstance(result['data_result'], (dict, list)) else str(result['data_result']))
-                    
-                    # 🎨 ВИЗУАЛИЗАЦИИ - улучшенный блок
-                    if result.get('figures'):
-                        st.markdown("### 📈 Сгенерированные визуализации")
+                    # Тест подключения перед основным запросом
+                    test_result = agent.test_connection()
+                    if not test_result['success']:
+                        st.error("❌ Проблемы с подключением к API:")
+                        st.markdown(f"<div class='error-box'>{test_result['error']}</div>", unsafe_allow_html=True)
                         
-                        # Вкладки для нескольких графиков
-                        if len(result['figures']) > 1:
-                            tabs = st.tabs([f"График {i+1}" for i in range(len(result['figures']))])
-                            for idx, (tab, fig) in enumerate(zip(tabs, result['figures'])):
-                                with tab:
-                                    st.plotly_chart(fig, use_container_width=True, key=f"fig_{idx}")
+                        if 'details' in test_result:
+                            with st.expander("🔍 Детали ошибки"):
+                                st.json(test_result['details'])
+                                
+                                if 'possible_causes' in test_result['details']:
+                                    st.warning("💡 Возможные причины:")
+                                    for cause in test_result['details']['possible_causes']:
+                                        st.markdown(f"• {cause}")
                                     
-                                    # Кнопки экспорта
-                                    col_exp1, col_exp2 = st.columns(2)
-                                    with col_exp1:
-                                        png_data = download_plotly_fig(fig, f"plot_{idx+1}", 'png')
-                                        if png_data:
-                                            st.download_button("📥 PNG", data=base64.b64decode(png_data),
-                                                             file_name=f"plot_{idx+1}.png", mime="image/png")
-                                    with col_exp2:
-                                        html_data = download_plotly_fig(fig, f"plot_{idx+1}", 'html')
-                                        if html_data:
-                                            st.download_button("🌐 HTML", data=base64.b64decode(html_data),
-                                                             file_name=f"plot_{idx+1}.html", mime="text/html")
+                                    st.info("🔧 Что делать:")
+                                    st.markdown("""
+                                    1. **Проверьте API ключ** - скопируйте его заново из DashScope
+                                    2. **Убедитесь, что ключ активен** - проверьте баланс и лимиты
+                                    3. **Проверьте интернет-соединение**
+                                    4. **Попробуйте другую модель** - возможно, текущая недоступна
+                                    """)
+                        st.stop()
+                    
+                    result = agent.run_analysis(query, df, auto_eda=False, theme=theme)
+                    
+                    # Сохранение в историю
+                    st.session_state.analysis_history.append({
+                        'timestamp': datetime.now().isoformat(),
+                        'query': query,
+                        'success': result['success'],
+                        'error': result.get('error')
+                    })
+                    
+                    # Логирование ошибок API
+                    if not result['success'] and result.get('stage') == 'api_call':
+                        st.session_state.api_errors_log.append({
+                            'timestamp': datetime.now().isoformat(),
+                            'query': query,
+                            'error_type': result.get('error_type'),
+                            'error': result.get('error'),
+                            'details': result.get('details')
+                        })
+                    
+                    st.markdown("---")
+                    
+                    # Обработка результатов
+                    if not result['success']:
+                        if result.get('stage') == 'api_call':
+                            st.error(f"❌ {result.get('error')}")
+                            
+                            if result.get('error_type') == 'AuthenticationError':
+                                st.markdown("""
+                                <div class='error-box'>
+                                <strong>🔑 Проблема с аутентификацией</strong><br>
+                                Проверьте:
+                                <ul>
+                                <li>API ключ введён правильно (без пробелов)</li>
+                                <li>Ключ активен и не истёк</li>
+                                <li>На счёте есть токены</li>
+                                <li>Ключ имеет доступ к выбранной модели</li>
+                                </ul>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            elif result.get('error_type') == 'RateLimitError':
+                                st.warning("⏱ **Превышен лимит запросов**<br>Подождите несколько минут и попробуйте снова.")
+                            
+                            if result.get('details'):
+                                with st.expander("🔍 Технические детали"):
+                                    st.json(result.get('details', {}))
+                            
+                            if result.get('traceback'):
+                                with st.expander("📄 Full Traceback"):
+                                    st.code(result['traceback'], language='python')
+                            
+                            # Диагностическая информация
+                            with st.expander("📊 Диагностика API"):
+                                st.json(result.get('api_diagnostics', {}))
                         else:
-                            fig = result['figures'][0]
-                            st.plotly_chart(fig, use_container_width=True)
-                            # Экспорт для одиночного графика
-                            col_e1, col_e2, col_e3 = st.columns(3)
-                            with col_e1:
-                                png_data = download_plotly_fig(fig, "result", 'png')
-                                if png_data:
-                                    st.download_button("📥 PNG", data=base64.b64decode(png_data),
-                                                     file_name="visualization.png", mime="image/png")
-                            with col_e2:
-                                html_data = download_plotly_fig(fig, "result", 'html')
-                                if html_data:
-                                    st.download_button("🌐 HTML", data=base64.b64decode(html_data),
-                                                     file_name="visualization.html", mime="text/html")
-                            with col_e3:
-                                json_data = fig.to_plotly_json()
-                                st.download_button("🔧 JSON", data=json.dumps(json_data),
-                                                 file_name="visualization.json", mime="application/json")
-                    
-                    # Объяснение результатов
-                    if result.get('explanation'):
-                        st.info(f"💡 **Интерпретация:** {result['explanation']}")
-                    
-                    # Рекомендации для следующих шагов
-                    if not run_eda and result.get('success'):
-                        with st.expander("🔄 Что можно сделать дальше?"):
-                            suggestions = [
-                                "🔍 Детализировать конкретный аспект анализа",
-                                "📊 Добавить новые типы визуализаций",
-                                "🧹 Очистить данные от выбросов или пропусков",
-                                "📈 Построить прогнозную модель",
-                                "💾 Экспортировать результаты в отчёт"
-                            ]
-                            for s in suggestions:
-                                st.markdown(f"• {s}")
+                            st.error(f"❌ Ошибка выполнения: {result.get('error')}")
+                            if result.get('traceback'):
+                                with st.expander("📄 Stack trace"):
+                                    st.code(result['traceback'], language='python')
+                    else:
+                        # Успешный результат
+                        if result.get('thought'):
+                            with st.expander("💭 Ход рассуждений агента", expanded=True):
+                                st.markdown(result['thought'])
+                        
+                        with st.expander("📝 Сгенерированный код", expanded=False):
+                            st.code(result['code'], language='python')
+                        
+                        if result.get('output'):
+                            with st.expander("📤 Консольный вывод", expanded=True):
+                                for line in result['output']:
+                                    st.text(line)
+                        
+                        if result.get('data_result') is not None:
+                            st.markdown("### 📋 Результаты вычислений")
+                            if isinstance(result['data_result'], pd.DataFrame):
+                                st.dataframe(result['data_result'], use_container_width=True)
+                            else:
+                                st.write(result['data_result'])
+                        
+                        if result.get('figures'):
+                            st.markdown("### 📈 Визуализации")
+                            for idx, fig in enumerate(result['figures']):
+                                st.plotly_chart(fig, use_container_width=True, key=f"fig_{idx}")
+                        
+                        if result.get('explanation'):
+                            st.info(f"💡 **Интерпретация:** {result['explanation']}")
+                        
+                        # Показ статистики использования API
+                        if result.get('api_usage'):
+                            with st.expander("📊 Статистика API"):
+                                st.json(result['api_usage'])
+                
+                except Exception as e:
+                    st.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {str(e)}")
+                    with st.expander("🔍 Stack trace"):
+                        st.code(traceback.format_exc(), language='python')
     
     except Exception as e:
-        st.error(f"❌ Ошибка обработки: {type(e).__name__}: {e}")
+        st.error(f"❌ Ошибка загрузки файла: {type(e).__name__}: {e}")
         with st.expander("🔍 Stack trace"):
             st.code(traceback.format_exc(), language='python')
 else:
-    # Стартовый экран
     st.info("👆 **Загрузите CSV или Excel файл** для начала анализа")
     
     st.markdown("### 💡 Примеры запросов:")
     examples = [
         "Построй гистограмму распределения возраста",
         "Сравни среднюю зарплату по отделам",
-        "Найди корреляции между числовыми переменными",
-        "Визуализируй динамику продаж по месяцам",
-        "Покажи box plot для выявления выбросов"
+        "Найди корреляции между числовыми переменными"
     ]
     for ex in examples:
         st.markdown(f"• `{ex}`")
-    
-    st.markdown("### 🎯 Возможности:")
-    cols = st.columns(3)
-    cols[0].markdown("📊 **Визуализации**\n• Plotly Express & Graph Objects\n• Интерактивные дашборды\n• Экспорт в PNG/HTML")
-    cols[1].markdown("🔒 **Безопасность**\n• Песочница для кода\n• Фильтрация опасных операций\n• Валидация запросов")
-    cols[2].markdown("🤖 **AI-помощник**\n• Генерация кода на естественном языке\n• Объяснение результатов\n• Рекомендации по анализу")
 
 # Футер
 st.markdown("---")
-st.caption("🤖 AI Analytics Agent Pro | Powered by Qwen3.6-Plus & Plotly | Данные обрабатываются локально в сессии")
+st.caption("🤖 AI Analytics Agent Pro | Диагностика включена")
