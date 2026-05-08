@@ -50,22 +50,7 @@ class DataAnalysisAgent:
             resp.raise_for_status()
             data = resp.json()
             
-            content = ""
-            
-            if self.is_genapi:
-                if "response" in data and isinstance(data["response"], list) and data["response"]:
-                    content = data["response"][0]
-                elif "output" in data:
-                    content = data["output"] if isinstance(data["output"], str) else json.dumps(data["output"], ensure_ascii=False)
-                elif "choices" in data:
-                    content = data["choices"][0]["message"].get("content", "") if data["choices"] else ""
-                else:
-                    content = str(data)
-            else:
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"].get("content", "")
-                else:
-                    content = str(data)
+            content = self._extract_content(data)
             
             if content is None:
                 content = ""
@@ -75,6 +60,34 @@ class DataAnalysisAgent:
             return {"error": f"HTTP Error: {str(e)}"}
         except Exception as e:
             return {"error": f"Unexpected error: {str(e)}"}
+    
+    def _extract_content(self, data: Dict) -> Optional[str]:
+        """Извлекает текст ответа из различных форматов API."""
+        if not isinstance(data, dict):
+            return str(data)
+        
+        # Формат gen-api.ru: response[0] (старая версия)
+        if "response" in data and isinstance(data["response"], list) and data["response"]:
+            return str(data["response"][0])
+        
+        # Формат gen-api.ru: output
+        if "output" in data:
+            if isinstance(data["output"], str):
+                return data["output"]
+            return json.dumps(data["output"], ensure_ascii=False)
+        
+        # OpenAI-compatible: choices[0].message.content
+        if "choices" in data and isinstance(data["choices"], list) and len(data["choices"]) > 0:
+            choice = data["choices"][0]
+            if isinstance(choice, dict):
+                msg = choice.get("message", {})
+                if isinstance(msg, dict):
+                    return msg.get("content", "")
+                return str(msg)
+            return str(choice)
+        
+        # Если ничего не подошло — вернуть весь ответ как строку
+        return json.dumps(data, ensure_ascii=False)
     
     def _get_system_prompt(self, dataset_schema: str) -> str:
         return f"""Ты — агент-аналитик данных. У тебя есть доступ к pandas DataFrame `df`.
