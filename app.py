@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from llm_client import GigaChatAgent
+import json
+from llm_client import GigaChatAgent, get_gigachat_token
 from code_interpreter import CodeInterpreter
 from prompt_security import PromptSecurity
 from analytics_core import AnalyticsEngine
@@ -45,32 +45,37 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'api_authorized' not in st.session_state:
     st.session_state.api_authorized = False
+if 'dataset_context' not in st.session_state:
+    st.session_state.dataset_context = ""
 
 # Sidebar
 with st.sidebar:
     st.title("⚙️ Настройки")
-    
+
     # Авторизация GigaChat
     st.subheader("🔐 GigaChat API")
-    auth_method = st.radio("Метод авторизации", ["OAuth SBER", "API Key"])
-    
+    auth_method = st.radio("Метод авторизации", ["OAuth SBER", "API Key (Access Token)"])
+
     if auth_method == "OAuth SBER":
         client_id = st.text_input("Client ID", type="password")
         client_secret = st.text_input("Client Secret", type="password")
-        
+        scope = st.selectbox("Scope", ["GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"])
+
         if st.button("Получить токен"):
-            try:
-                from llm_client import get_gigachat_token
-                token = get_gigachat_token(client_id, client_secret)
-                st.session_state.agent = GigaChatAgent(token=token)
-                st.session_state.api_authorized = True
-                st.success("✅ Авторизация успешна!")
-            except Exception as e:
-                st.error(f"❌ Ошибка: {str(e)}")
-                st.code(traceback.format_exc())
-    
+            if not client_id or not client_secret:
+                st.error("Введите Client ID и Client Secret")
+            else:
+                try:
+                    token = get_gigachat_token(client_id, client_secret, scope)
+                    st.session_state.agent = GigaChatAgent(token=token)
+                    st.session_state.api_authorized = True
+                    st.success("✅ Авторизация успешна!")
+                except Exception as e:
+                    st.error(f"❌ Ошибка авторизации: {str(e)}")
+                    st.code(traceback.format_exc())
+
     else:
-        api_key = st.text_input("API Key", type="password")
+        api_key = st.text_input("Access Token / API Key", type="password")
         if api_key:
             try:
                 st.session_state.agent = GigaChatAgent(api_key=api_key)
@@ -78,9 +83,9 @@ with st.sidebar:
                 st.success("✅ API ключ принят")
             except Exception as e:
                 st.error(f"❌ Ошибка: {str(e)}")
-    
+
     st.divider()
-    
+
     # Загрузка файла
     st.subheader("📁 Данные")
     uploaded_file = st.file_uploader(
@@ -88,23 +93,29 @@ with st.sidebar:
         type=['csv', 'xlsx', 'xls'],
         help="Поддерживаемые форматы: CSV, XLSX, XLS"
     )
-    
+
     if uploaded_file is not None:
         try:
-            # Определение типа файла
             if uploaded_file.name.endswith('.csv'):
                 st.session_state.df = pd.read_csv(uploaded_file)
             else:
                 st.session_state.df = pd.read_excel(uploaded_file)
-            
+
             st.success(f"✅ Файл загружен: {uploaded_file.name}")
-            
-            # Показ статистики
             st.info(f"📊 Строк: {len(st.session_state.df)}")
             st.info(f"📊 Столбцов: {len(st.session_state.df.columns)}")
-            
+
         except Exception as e:
             st.error(f"❌ Ошибка загрузки: {str(e)}")
+
+    # Контекст датасета
+    st.subheader("📝 Контекст датасета")
+    st.session_state.dataset_context = st.text_area(
+        "Опишите данные (что означают колонки, бизнес-контекст):",
+        value=st.session_state.dataset_context,
+        height=100,
+        placeholder="Например: Колонка 'sales' — выручка в рублях, 'date' — дата продажи..."
+    )
 
 # Основной контент
 st.title("🤖 AI Analytics Agent")
@@ -120,9 +131,8 @@ if st.session_state.df is None:
 
 # Показ превью данных
 with st.expander("👁️ Превью данных", expanded=False):
-    st.dataframe(st.session_state.df.head(10), width="stretch")
-    
-    # Статистика
+    st.dataframe(st.session_state.df.head(10), use_container_width=True)
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Строк", f"{len(st.session_state.df):,}")
     col2.metric("Столбцов", len(st.session_state.df.columns))
@@ -133,88 +143,90 @@ with st.expander("👁️ Превью данных", expanded=False):
 st.subheader("💬 Запрос к агенту")
 st.markdown("Опишите, что нужно проанализировать:")
 
-# Примеры запросов
 with st.expander("📋 Примеры запросов"):
     st.code("'Построй гистограмму распределения возраста'")
     st.code("'Найди корреляции между числовыми колонками'")
     st.code("'Рассчитай статистику по группам'")
     st.code("'Построй временной ряд продаж'")
 
-# Поле ввода запроса
 query = st.text_area(
     "Ваш запрос:",
     height=100,
     placeholder="Например: 'Проанализируй данные и построй график продаж по месяцам'"
 )
 
-# Кнопка анализа
 if st.button("🚀 Запустить анализ агента", type="primary"):
     if not query:
         st.warning("Введите запрос")
     else:
-        # Инициализация компонентов
         security = PromptSecurity()
         interpreter = CodeInterpreter()
         analytics = AnalyticsEngine(st.session_state.df)
-        
-        # Проверка на prompt injection
+
         if not security.is_safe(query):
             st.error("⚠️ Обнаружена потенциальная угроза безопасности!")
             st.stop()
-        
+
+        sanitized_query = security.sanitize(query)
+
         with st.spinner("🤖 Агент анализирует данные..."):
             try:
-                # Получение кода от LLM
                 code_response = st.session_state.agent.generate_analysis_code(
-                    query=query,
+                    query=sanitized_query,
                     dataframe=st.session_state.df,
+                    context=st.session_state.dataset_context or None,
                     chat_history=st.session_state.chat_history
                 )
-                
+
+                generated_code = code_response.get('code', '')
+
                 st.info("📝 Сгенерированный код:")
-                st.code(code_response.get('code', ''), language='python')
-                
-                # Выполнение кода
+                st.code(generated_code, language='python')
+
                 result = interpreter.execute_with_dataframe(
-                    code_response.get('code', ''),
+                    generated_code,
                     st.session_state.df,
                     timeout=30
                 )
-                
-                # Обработка результатов
+
                 if result.get('success'):
                     st.success("✅ Анализ завершен успешно!")
-                    
-                    # Показ результатов
-                    if 'plot' in result and result['plot'] is not None:
-                        st.plotly_chart(result['plot'], width="stretch")
-                    
-                    if 'output' in result and result['output']:
+
+                    if result.get('plot'):
+                        try:
+                            fig = go.Figure(json.loads(result['plot']))
+                            st.plotly_chart(fig, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Не удалось отобразить график: {e}")
+
+                    if result.get('output'):
                         st.markdown("### 📝 Результаты:")
                         st.markdown(result['output'])
-                    
-                    if 'data' in result and result['data'] is not None:
-                        st.dataframe(result['data'], width="stretch")
-                    
-                    # Добавление в историю
+
+                    if result.get('data'):
+                        st.markdown("### 📋 Таблица результатов:")
+                        st.dataframe(pd.DataFrame(result['data']), use_container_width=True)
+
                     st.session_state.chat_history.append({
                         'query': query,
-                        'code': code_response.get('code', ''),
+                        'code': generated_code,
                         'timestamp': datetime.now()
                     })
-                    
+
                 else:
                     st.error(f"❌ Ошибка выполнения: {result.get('error', 'Неизвестная ошибка')}")
-                    st.code(code_response.get('code', ''), language='python')
-                    
+                    if result.get('output'):
+                        st.text(result['output'])
+
             except Exception as e:
                 st.error(f"❌ Критическая ошибка: {str(e)}")
                 st.code(traceback.format_exc(), language='python')
 
-# История запросов
 if st.session_state.chat_history:
     with st.expander(f"📜 История запросов ({len(st.session_state.chat_history)})"):
-        for i, item in enumerate(st.session_state.chat_history):
-            st.markdown(f"**{i+1}.** {item['query']}")
+        for i, item in enumerate(reversed(st.session_state.chat_history)):
+            st.markdown(f"**{len(st.session_state.chat_history)-i}.** {item['query']}")
             st.caption(f"Время: {item['timestamp'].strftime('%H:%M:%S')}")
+            with st.expander("Показать код"):
+                st.code(item['code'], language='python')
             st.divider()
