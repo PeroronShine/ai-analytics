@@ -472,7 +472,7 @@ def download_plotly_fig(fig, filename: str, format: str = 'png'):
 
 
 # ================= UI =================
-st.set_page_config(page_title="🤖 AI Analytics Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI Analytics Pro", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
