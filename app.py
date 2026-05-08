@@ -1,4 +1,3 @@
-# app.py - AI Analytics Agent с авто-анализом для gen-api.ru
 import ssl
 import os
 import re
@@ -17,6 +16,7 @@ import ast
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from typing import Optional, Union, List
+import time 
 
 # Отключаем предупреждения SSL
 try:
