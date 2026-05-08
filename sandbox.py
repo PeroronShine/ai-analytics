@@ -28,15 +28,16 @@ class SandboxExecutor:
         allowed_names = allowed_names - dangerous
         
         self.safe_builtins = {}
+        builtins_dict = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__
         for name in allowed_names:
-            if hasattr(__builtins__, name):
-                self.safe_builtins[name] = getattr(__builtins__, name)
+            if name in builtins_dict:
+                self.safe_builtins[name] = builtins_dict[name]
     
     def _create_globals(self) -> Dict[str, Any]:
         import pandas as pd
         import numpy as np
         import matplotlib
-        matplotlib.use('Agg')  # Без GUI
+        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         
         return {
@@ -44,14 +45,13 @@ class SandboxExecutor:
             'pd': pd,
             'np': np,
             'plt': plt,
-            'df': self.df.copy(),   # Копия, чтобы оригинал не испортить
+            'df': self.df.copy(),
             'json': json,
             'base64': base64,
             'io': io,
         }
     
     def execute(self, code: str, timeout_seconds: int = 30) -> Dict[str, Any]:
-        # Убираем markdown-обёртку, если LLM её добавила
         code = code.strip()
         if code.startswith('```'):
             code = code.split('```', 2)[-1]
@@ -79,7 +79,6 @@ class SandboxExecutor:
                 plt.close()
             
             def capture_savefig(*args, **kwargs):
-                # Перехватываем любой savefig и сохраняем в буфер
                 buf = io.BytesIO()
                 original_savefig(buf, format='png', bbox_inches='tight')
                 buf.seek(0)
