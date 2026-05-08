@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 from agent import DataAnalysisAgent
 
+# ============== ЗАЩИТА ==============
 FORBIDDEN_PATTERNS = [
     r'(?i)(?:ignore|disregard).*?(?:previous|above|earlier).*?(?:instruction|prompt)',
     r'(?i)(?:new|ignore).*?(?:instruction|prompt)',
@@ -24,7 +25,7 @@ def check_safety(text: str) -> tuple:
     return True, ""
 
 # ============== UI ==============
-st.set_page_config(page_title="AI Data Agent", page_icon="📊", layout="wide")
+st.set_page_config(page_title="🤖 AI Data Agent", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -33,10 +34,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🤖 AI Data Agent")
+st.title("AI Data Agent")
 st.caption("Агентная аналитика: LLM пишет и выполняет Python-код над вашими данными")
 
-# Session state init
 for key in ['agent', 'chat_history', 'df', 'file_name']:
     if key not in st.session_state:
         st.session_state[key] = None if key != 'chat_history' else []
@@ -88,7 +88,6 @@ with st.sidebar:
     5. Вы получаете отчёт с цифрами и графиками
     """)
 
-# Основная зона
 if st.session_state.df is not None:
     df = st.session_state.df
     
@@ -104,7 +103,6 @@ if st.session_state.df is not None:
     st.markdown("---")
     st.subheader("💬 Аналитический чат")
     
-    # История
     for idx, msg in enumerate(st.session_state.chat_history):
         with st.chat_message(msg['role']):
             if msg['role'] == 'user':
@@ -141,7 +139,6 @@ if st.session_state.df is not None:
                                 if ex.get('error'):
                                     st.error(ex['error'][:400])
     
-    # Инициализация агента
     if st.session_state.agent is None and api_key and base_url:
         try:
             st.session_state.agent = DataAnalysisAgent(
