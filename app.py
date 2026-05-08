@@ -1,8 +1,10 @@
+# app.py - AI Analytics Agent для gen-api.ru Qwen3.6
 import ssl
 import os
 import re
 import json
 import base64
+import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -13,12 +15,8 @@ from io import StringIO, BytesIO
 import traceback
 import ast
 from contextlib import redirect_stdout, redirect_stderr
-import time
-from typing import Optional, Union, List
 from datetime import datetime
-
-# OpenAI-compatible client для Qwen
-from openai import OpenAI, APIError, AuthenticationError, RateLimitError
+from typing import Optional, Union, List
 
 # Отключаем предупреждения SSL
 try:
@@ -32,7 +30,7 @@ os.environ["CURL_CA_BUNDLE"] = ""
 # Настройки Plotly
 px.defaults.template = "plotly_white"
 
-# Запрещённые модули
+# Запрещённые модули для безопасного выполнения
 FORBIDDEN_MODULES = {
     'os', 'sys', 'subprocess', 'shutil', 'socket', 'requests', 'httpx',
     'urllib', 'ftplib', 'smtplib', 'paramiko', 'pickle', 'marshal', 'eval',
@@ -42,7 +40,7 @@ FORBIDDEN_BUILTINS = {'eval', 'exec', 'compile', 'import', 'open', 'input'}
 
 
 class SafeCodeExecutor:
-    """Безопасный исполнитель кода"""
+    """Безопасный исполнитель кода с поддержкой визуализаций"""
     
     def __init__(self, df: pd.DataFrame, timeout: int = 30, theme: str = 'plotly_white'):
         self.df = df.copy()
@@ -53,7 +51,7 @@ class SafeCodeExecutor:
         px.defaults.template = theme
 
     def _safe_globals(self):
-        """Безопасное окружение"""
+        """Безопасное окружение для exec()"""
         allowed_modules = {
             'pd': pd, 'pandas': pd,
             'np': np, 'numpy': np,
@@ -78,7 +76,7 @@ class SafeCodeExecutor:
         }
 
     def _normalize_figure(self, fig) -> go.Figure:
-        """Приведение фигуры к стандартному формату"""
+        """Приведение фигуры к стандартному формату Plotly"""
         if isinstance(fig, go.Figure):
             fig.update_layout(template=self.theme, height=500, margin=dict(l=40, r=40, t=40, b=40))
             return fig
@@ -91,7 +89,7 @@ class SafeCodeExecutor:
                 return None
 
     def _save_fig_callback(self, fig, filename: str = "plot", title: str = None, **layout_kwargs):
-        """Сохранение графика"""
+        """Сохранение графика в коллекцию"""
         try:
             normalized = self._normalize_figure(fig)
             if normalized:
@@ -111,7 +109,7 @@ class SafeCodeExecutor:
 
     def _create_dashboard_callback(self, figs: List, titles: List[str] = None, 
                                   subplot_titles: List[str] = None, rows: int = None, cols: int = None):
-        """Создание дашборда"""
+        """Создание дашборда из нескольких графиков"""
         if not figs:
             return "❌ Нет графиков для дашборда"
         
@@ -147,7 +145,7 @@ class SafeCodeExecutor:
         return self._save_fig_callback(dashboard, filename="dashboard", title="Аналитический дашборд")
 
     def _validate_code(self, code: str) -> tuple:
-        """Проверка кода"""
+        """Проверка кода на запрещённые операции"""
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
@@ -171,7 +169,7 @@ class SafeCodeExecutor:
         return True, "OK"
 
     def execute(self, code: str) -> dict:
-        """Выполнение кода"""
+        """Выполнение кода в безопасном окружении"""
         result = {'success': False, 'output': [], 'error': None, 'figures': [], 'data_result': None, 'debug_info': {}}
 
         is_valid, message = self._validate_code(code)
@@ -212,109 +210,125 @@ class SafeCodeExecutor:
 
 
 class QwenAnalyticsAgent:
-    """Агент с улучшенной обработкой ошибок API"""
+    """Агент для gen-api.ru Qwen3.6"""
     
-    def __init__(self, api_key: str, model: str = "qwen3.6-plus"):
+    def __init__(self, api_key: str, model: str = "qwen-3-6-plus"):
         self.api_key = api_key
         self.model = model
         self.df_info = None
-        self.api_errors = []
-        self.request_history = []
+        self.base_url = "https://api.gen-api.ru/api/v1/networks/qwen-3-6-plus"
         
-        # Инициализация клиента с проверкой
-        try:
-            self.client = OpenAI(
-                api_key=api_key,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                timeout=30.0  # Таймаут 30 секунд
-            )
-            self.client_initialized = True
-        except Exception as e:
-            self.client = None
-            self.client_initialized = False
-            self.init_error = str(e)
-
     def test_connection(self) -> dict:
         """Тестирование подключения к API"""
-        if not self.client_initialized:
-            return {
-                'success': False,
-                'error': f"Не удалось инициализировать клиент: {getattr(self, 'init_error', 'Неизвестная ошибка')}",
-                'details': {
-                    'api_key_set': bool(self.api_key),
-                    'api_key_length': len(self.api_key) if self.api_key else 0,
-                    'client_initialized': False
-                }
-            }
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        input_data = {
+            "messages": [{"role": "user", "content": "Hi"}],
+            "is_sync": True,
+            "max_tokens": 10
+        }
         
         try:
-            # Пробный запрос с минимальными токенами
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=5,
-                temperature=0
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=input_data,
+                timeout=30
             )
-            return {
-                'success': True,
-                'error': None,
-                'details': {
-                    'api_key_set': bool(self.api_key),
-                    'api_key_length': len(self.api_key) if self.api_key else 0,
-                    'client_initialized': True,
-                    'model': self.model,
-                    'response_received': True,
-                    'timestamp': datetime.now().isoformat()
+            
+            if response.status_code == 200:
+                return {
+                    'success': True,
+                    'error': None,
+                    'details': {
+                        'status_code': response.status_code,
+                        'api_key_valid': True,
+                        'model': self.model,
+                        'timestamp': datetime.now().isoformat()
+                    }
                 }
-            }
-        except AuthenticationError as e:
+            elif response.status_code == 401:
+                return {
+                    'success': False,
+                    'error': "❌ Неверный API токен",
+                    'details': {
+                        'status_code': response.status_code,
+                        'response': response.json() if response.text else "Empty response",
+                        'possible_causes': [
+                            "Неверный токен",
+                            "Токен не активирован",
+                            "Токен истёк",
+                            "Неправильный формат токена"
+                        ]
+                    }
+                }
+            elif response.status_code == 429:
+                return {
+                    'success': False,
+                    'error': "⏱ Превышен лимит запросов",
+                    'details': {
+                        'status_code': response.status_code,
+                        'response': response.json() if response.text else "Rate limited",
+                        'possible_causes': [
+                            "Превышен лимит в минуту",
+                            "Превышен дневной лимит",
+                            "Недостаточно токенов на счёте"
+                        ]
+                    }
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f"❌ Ошибка API: {response.status_code}",
+                    'details': {
+                        'status_code': response.status_code,
+                        'response': response.json() if response.text else response.text
+                    }
+                }
+                
+        except requests.exceptions.ConnectionError:
             return {
                 'success': False,
-                'error': "❌ Ошибка аутентификации",
+                'error': "❌ Нет подключения к интернету",
                 'details': {
-                    'error_type': 'AuthenticationError',
-                    'message': str(e),
+                    'error_type': 'ConnectionError',
                     'possible_causes': [
-                        "Неверный API ключ",
-                        "Ключ истёк",
-                        "Ключ не активирован",
-                        "Неправильный формат ключа"
+                        "Проверьте интернет-соединение",
+                        "Возможно, API сервер временно недоступен",
+                        "Брандмауэр может блокировать соединение"
                     ]
                 }
             }
-        except RateLimitError as e:
+        except requests.exceptions.Timeout:
             return {
                 'success': False,
-                'error': "⏱ Превышен лимит запросов",
+                'error': "⏱ Таймаут подключения",
                 'details': {
-                    'error_type': 'RateLimitError',
-                    'message': str(e),
+                    'error_type': 'Timeout',
                     'possible_causes': [
-                        "Превышен дневной лимит",
-                        "Превышен лимит запросов в минуту",
-                        "Недостаточно токенов на счёте"
+                        "Медленное интернет-соединение",
+                        "Сервер перегружен",
+                        "Попробуйте увеличить таймаут"
                     ]
                 }
             }
         except Exception as e:
             return {
                 'success': False,
-                'error': f"❌ Ошибка подключения: {type(e).__name__}",
+                'error': f"❌ Ошибка: {type(e).__name__}",
                 'details': {
-                    'error_type': type(e).__name__,
+                    'error_type': type(e).__name__, 
                     'message': str(e),
-                    'traceback': traceback.format_exc(),
-                    'possible_causes': [
-                        "Проблемы с интернет-соединением",
-                        "API сервер недоступен",
-                        "Неверный URL API",
-                        "Брандмауэр блокирует соединение"
-                    ]
+                    'traceback': traceback.format_exc()
                 }
             }
 
     def prepare_dataset_context(self, df: pd.DataFrame):
-        """Подготовка контекста данных"""
+        """Подготовка контекста данных для LLM"""
         numeric_cols = df.select_dtypes(include='number').columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
         
@@ -322,121 +336,117 @@ class QwenAnalyticsAgent:
             'shape': df.shape,
             'columns': df.columns.tolist(),
             'dtypes': df.dtypes.astype(str).to_dict(),
-            'numeric_cols': numeric_cols[:10],  # Первые 10
+            'numeric_cols': numeric_cols[:10],
             'categorical_cols': categorical_cols[:10],
             'sample': df.head(2).to_dict(orient='records'),
             'missing': {k: int(v) for k, v in df.isnull().sum().items() if v > 0}
         }
 
     def generate_code(self, user_query: str, auto_eda: bool = False) -> dict:
-        """Генерация кода с полной информацией об ошибках"""
-        system_prompt = """Ты эксперт по визуализации данных. Отвечай ТОЛЬКО JSON:
+        """Генерация кода через gen-api.ru"""
+        
+        system_prompt = """Ты эксперт по визуализации данных. Отвечай ТОЛЬКО валидным JSON:
 {
-"thought": "краткое рассуждение",
-"code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import!",
-"explanation": "что покажут графики"
+"thought": "краткое рассуждение о подходе к задаче",
+"code": "Python код. УЖЕ импортированы: pd, np, px, go, make_subplots. НЕ пиши import! Используй: df, save_fig(fig, 'name', title='...'), print(), result",
+"explanation": "что покажут графики и как интерпретировать результаты"
 }
 
-ПРАВИЛА:
-1. Всегда вызывай save_fig(fig, 'unique_name', title='...')
+ПРАВИЛА для кода:
+1. Всегда вызывай save_fig(fig, 'unique_name', title='Заголовок') для каждого графика
 2. Используй px для быстрых графиков, go для кастомных
-3. result = df.groupby(...).agg(...) для табличных результатов"""
+3. Добавляй подписи осей: labels={'x': '...', 'y': '...'}
+4. Для нескольких графиков: create_dashboard([fig1, fig2], titles=['A', 'B'])
+5. result = df.groupby(...).agg(...) для табличных результатов
+6. Не используй plt.show() - графики отображаются через save_fig()"""
 
         context = f"Данные: {json.dumps(self.df_info, ensure_ascii=False)}\nЗадача: {user_query}"
+        
+        if auto_eda:
+            context += "\n\nСоздай комплексную визуализацию: 1) гистограммы числовых переменных, 2) корреляционную матрицу если >1 числового столбца, 3) бар-чарты для категориальных, 4) scatter plot для пар числовых"
 
-        request_info = {
-            'timestamp': datetime.now().isoformat(),
-            'query': user_query,
-            'model': self.model,
-            'auto_eda': auto_eda
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
         }
-
+        
+        input_data = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context}
+            ],
+            "is_sync": True,
+            "temperature": 0.2 if auto_eda else 0.3,
+            "top_p": 0.9,
+            "response_format": {"type": "json_object"}
+        }
+        
         try:
-            if not self.client_initialized:
-                raise Exception(f"Клиент не инициализирован: {getattr(self, 'init_error', 'Unknown')}")
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": context}
-                ],
-                temperature=0.2 if auto_eda else 0.3,
-                max_tokens=2500,
-                response_format={"type": "json_object"}
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=input_data,
+                timeout=60
             )
             
-            request_info['response_tokens'] = response.usage.completion_tokens if hasattr(response, 'usage') else None
-            request_info['success'] = True
-            
-            self.request_history.append(request_info)
-            
-            return {
-                'success': True,
-                'content': response.choices[0].message.content,
-                'usage': {
-                    'prompt_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') else None,
-                    'completion_tokens': response.usage.completion_tokens if hasattr(response, 'usage') else None
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Извлекаем ответ из структуры gen-api.ru
+                if 'output' in result:
+                    content = result['output']
+                elif 'choices' in result and len(result['choices']) > 0:
+                    content = result['choices'][0].get('message', {}).get('content', '')
+                elif 'result' in result:
+                    content = result['result']
+                else:
+                    content = json.dumps(result)
+                
+                return {
+                    'success': True,
+                    'content': content,
+                    'raw_response': result
                 }
-            }
-            
-        except AuthenticationError as e:
-            error_info = {
-                'type': 'AuthenticationError',
-                'message': str(e),
-                'details': 'Неверный API ключ или ключ не активен'
-            }
-            request_info['error'] = error_info
-            self.request_history.append(request_info)
-            self.api_errors.append(error_info)
-            
+            else:
+                error_details = response.text
+                try:
+                    error_details = response.json()
+                except:
+                    pass
+                    
+                return {
+                    'success': False,
+                    'error_type': f'HTTP_{response.status_code}',
+                    'message': f'Ошибка API: {response.status_code}',
+                    'details': error_details,
+                    'status_code': response.status_code
+                }
+                
+        except requests.exceptions.Timeout:
             return {
                 'success': False,
-                'error_type': 'AuthenticationError',
-                'message': 'Ошибка аутентификации. Проверьте API ключ.',
-                'details': str(e),
-                'raw_response': None
+                'error_type': 'Timeout',
+                'message': 'Превышено время ожидания ответа от API',
+                'details': 'Попробуйте повторить запрос или упростите задачу'
             }
-            
-        except RateLimitError as e:
-            error_info = {
-                'type': 'RateLimitError',
-                'message': str(e),
-                'details': 'Превышен лимит запросов'
-            }
-            request_info['error'] = error_info
-            self.request_history.append(request_info)
-            self.api_errors.append(error_info)
-            
+        except requests.exceptions.ConnectionError:
             return {
                 'success': False,
-                'error_type': 'RateLimitError',
-                'message': 'Превышен лимит запросов. Подождите немного.',
-                'details': str(e),
-                'raw_response': None
+                'error_type': 'ConnectionError',
+                'message': 'Нет подключения к API серверу',
+                'details': 'Проверьте интернет-соединение'
             }
-            
         except Exception as e:
-            error_info = {
-                'type': type(e).__name__,
-                'message': str(e),
-                'traceback': traceback.format_exc()
-            }
-            request_info['error'] = error_info
-            self.request_history.append(request_info)
-            self.api_errors.append(error_info)
-            
             return {
                 'success': False,
                 'error_type': type(e).__name__,
-                'message': f'Ошибка API: {type(e).__name__}',
-                'details': str(e),
-                'traceback': traceback.format_exc(),
-                'raw_response': None
+                'message': f'Ошибка: {str(e)}',
+                'details': traceback.format_exc()
             }
 
     def run_analysis(self, user_query: str, df: pd.DataFrame, auto_eda: bool = False, theme: str = 'plotly_white') -> dict:
-        """Запуск анализа"""
+        """Запуск полного анализа"""
         self.prepare_dataset_context(df)
         
         # Генерация кода
@@ -446,21 +456,16 @@ class QwenAnalyticsAgent:
             return {
                 'success': False,
                 'stage': 'api_call',
-                'error': gen_result['message'],
+                'error': gen_result.get('message', 'Неизвестная ошибка'),
                 'error_type': gen_result.get('error_type'),
                 'details': gen_result.get('details'),
-                'traceback': gen_result.get('traceback'),
-                'api_diagnostics': {
-                    'model': self.model,
-                    'api_key_length': len(self.api_key) if self.api_key else 0,
-                    'client_initialized': self.client_initialized
-                }
+                'status_code': gen_result.get('status_code')
             }
         
-        # Парсинг ответа
+        # Парсинг JSON ответа
         try:
             plan = json.loads(gen_result['content'])
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             match = re.search(r'\{[\s\S]*\}', gen_result['content'])
             if match:
                 try:
@@ -488,13 +493,12 @@ class QwenAnalyticsAgent:
             'error': exec_result.get('error'),
             'traceback': exec_result.get('traceback'),
             'debug_info': exec_result.get('debug_info', {}),
-            'api_usage': gen_result.get('usage'),
-            'full_llm_response': gen_result['content']  # Полный ответ от LLM
+            'full_llm_response': gen_result['content']
         }
 
 
 def check_safety(query: str) -> tuple:
-    """Проверка безопасности"""
+    """Проверка безопасности запроса"""
     forbidden = [r'eval\s*\(', r'exec\s*\(', r'import\s+', r'os\.system', r'__']
     for pattern in forbidden:
         if re.search(pattern, query, re.IGNORECASE):
@@ -502,20 +506,36 @@ def check_safety(query: str) -> tuple:
     return True, "✅ Безопасно"
 
 
+def download_plotly_fig(fig, filename: str, format: str = 'png'):
+    """Конвертация Plotly фигуры для скачивания"""
+    try:
+        if format == 'png':
+            img_bytes = fig.to_image(format="png", width=1200, height=600, scale=2)
+            return base64.b64encode(img_bytes).decode()
+        elif format == 'html':
+            html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+            return base64.b64encode(html.encode()).decode()
+    except Exception as e:
+        st.warning(f"⚠️ Не удалось экспортировать график: {e}")
+    return None
+
+
 # ================= UI =================
 st.set_page_config(page_title="AI Analytics Pro", page_icon="🤖", layout="wide")
 
+# Кастомные стили
 st.markdown("""
 <style>
     .stPlotlyChart {border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);}
+    .stTabs [data-baseweb="tab-list"] {gap: 8px;}
     .error-box {background-color: #ffebee; padding: 10px; border-radius: 5px; border-left: 4px solid #f44336;}
     .warning-box {background-color: #fff3e0; padding: 10px; border-radius: 5px; border-left: 4px solid #ff9800;}
     .success-box {background-color: #e8f5e9; padding: 10px; border-radius: 5px; border-left: 4px solid #4caf50;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("AI Analytics Agent Pro")
-st.markdown("*🤖 Интеллектуальный анализ данных с детальной диагностикой*")
+st.title("🤖 AI Analytics Agent Pro")
+st.markdown("*Интеллектуальный анализ данных на Qwen3.6-plus")
 
 # Инициализация session state
 if 'analysis_history' not in st.session_state:
@@ -526,14 +546,13 @@ if 'api_errors_log' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Настройки")
     
-    api_key = st.text_input("🔑 DashScope API Key", type="password", 
-                           help="Получите ключ на dashscope.aliyun.com")
+    api_key = st.text_input("🔑 Gen-API.ru Token", type="password", 
+                           help="Получите токен в личном кабинете gen-api.ru")
     
     if api_key:
-        # Кнопка тестирования подключения
-        if st.button("🔌 Проверить подключение к API", type="secondary"):
+        if st.button("🔌 Проверить подключение", type="secondary"):
             with st.spinner("Тестирование..."):
-                test_agent = QwenAnalyticsAgent(api_key=api_key, model=st.session_state.get('selected_model', 'qwen3.6-plus'))
+                test_agent = QwenAnalyticsAgent(api_key=api_key, model=st.session_state.get('selected_model', 'qwen-3-6-plus'))
                 test_result = test_agent.test_connection()
                 
                 if test_result['success']:
@@ -541,23 +560,22 @@ with st.sidebar:
                     st.json(test_result['details'])
                 else:
                     st.error(test_result['error'])
-                    st.warning("🔍 Детали:")
-                    st.json(test_result.get('details', {}))
-                    
-                    if 'possible_causes' in test_result.get('details', {}):
-                        st.info("💡 Возможные причины:")
-                        for cause in test_result['details']['possible_causes']:
-                            st.markdown(f"• {cause}")
+                    if 'details' in test_result:
+                        with st.expander("🔍 Детали"):
+                            st.json(test_result['details'])
+                        if 'possible_causes' in test_result['details']:
+                            st.info("💡 Возможные причины:")
+                            for cause in test_result['details']['possible_causes']:
+                                st.markdown(f"• {cause}")
         
         if len(api_key) > 10:
-            st.success("✅ Ключ введён")
+            st.success("✅ Токен введён")
     
-    model = st.selectbox("🧠 Модель", ["qwen3.6-plus", "qwen3.5-plus", "qwen-max"], 
+    model = st.selectbox("🧠 Модель", ["qwen-3-6-plus", "qwen-3-5-plus", "qwen-max"], 
                         index=0, key='selected_model')
     
     st.divider()
     
-    # Настройки визуализации
     st.subheader("🎨 Визуализация")
     theme = st.selectbox("Тема графиков", 
                         ['plotly_white', 'plotly', 'ggplot2', 'seaborn', 'simple_white', 'plotly_dark'],
@@ -565,9 +583,8 @@ with st.sidebar:
     
     st.divider()
     
-    # Диагностика
     st.subheader("🔍 Диагностика")
-    if st.button("📋 Показать историю ошибок API"):
+    if st.button("📋 История ошибок"):
         if st.session_state.api_errors_log:
             st.error(f"Всего ошибок: {len(st.session_state.api_errors_log)}")
             for idx, err in enumerate(st.session_state.api_errors_log[-5:], 1):
@@ -610,11 +627,11 @@ if uploaded_file:
                     disabled=not (api_key and query)):
             
             if not api_key:
-                st.error("❌ Введите API ключ")
+                st.error("❌ Введите API токен")
                 st.stop()
             
             if len(api_key) < 10:
-                st.error("❌ API ключ слишком короткий")
+                st.error("❌ Токен слишком короткий")
                 st.stop()
             
             is_safe, msg = check_safety(query)
@@ -626,7 +643,7 @@ if uploaded_file:
                 try:
                     agent = QwenAnalyticsAgent(api_key=api_key, model=model)
                     
-                    # Тест подключения перед основным запросом
+                    # Тест подключения
                     test_result = agent.test_connection()
                     if not test_result['success']:
                         st.error("❌ Проблемы с подключением к API:")
@@ -635,7 +652,6 @@ if uploaded_file:
                         if 'details' in test_result:
                             with st.expander("🔍 Детали ошибки"):
                                 st.json(test_result['details'])
-                                
                                 if 'possible_causes' in test_result['details']:
                                     st.warning("💡 Возможные причины:")
                                     for cause in test_result['details']['possible_causes']:
@@ -643,16 +659,16 @@ if uploaded_file:
                                     
                                     st.info("🔧 Что делать:")
                                     st.markdown("""
-                                    1. **Проверьте API ключ** - скопируйте его заново из DashScope
-                                    2. **Убедитесь, что ключ активен** - проверьте баланс и лимиты
-                                    3. **Проверьте интернет-соединение**
+                                    1. **Проверьте токен** - скопируйте заново из gen-api.ru
+                                    2. **Убедитесь, что токен активен** - проверьте личный кабинет
+                                    3. **Проверьте баланс** - достаточно ли токенов
                                     4. **Попробуйте другую модель** - возможно, текущая недоступна
                                     """)
                         st.stop()
                     
                     result = agent.run_analysis(query, df, auto_eda=False, theme=theme)
                     
-                    # Сохранение в историю
+                    # Логирование
                     st.session_state.analysis_history.append({
                         'timestamp': datetime.now().isoformat(),
                         'query': query,
@@ -660,7 +676,6 @@ if uploaded_file:
                         'error': result.get('error')
                     })
                     
-                    # Логирование ошибок API
                     if not result['success'] and result.get('stage') == 'api_call':
                         st.session_state.api_errors_log.append({
                             'timestamp': datetime.now().isoformat(),
@@ -677,22 +692,22 @@ if uploaded_file:
                         if result.get('stage') == 'api_call':
                             st.error(f"❌ {result.get('error')}")
                             
-                            if result.get('error_type') == 'AuthenticationError':
+                            if result.get('error_type') == 'HTTP_401':
                                 st.markdown("""
                                 <div class='error-box'>
                                 <strong>🔑 Проблема с аутентификацией</strong><br>
                                 Проверьте:
                                 <ul>
-                                <li>API ключ введён правильно (без пробелов)</li>
-                                <li>Ключ активен и не истёк</li>
+                                <li>Токен введён правильно (без пробелов)</li>
+                                <li>Токен активен в личном кабинете gen-api.ru</li>
                                 <li>На счёте есть токены</li>
-                                <li>Ключ имеет доступ к выбранной модели</li>
+                                <li>Токен имеет доступ к выбранной модели</li>
                                 </ul>
                                 </div>
                                 """, unsafe_allow_html=True)
                             
-                            elif result.get('error_type') == 'RateLimitError':
-                                st.warning("⏱ **Превышен лимит запросов**<br>Подождите несколько минут и попробуйте снова.")
+                            elif result.get('error_type') == 'HTTP_429':
+                                st.warning("⏱ **Превышен лимит запросов**<br>Подождите немного и попробуйте снова.")
                             
                             if result.get('details'):
                                 with st.expander("🔍 Технические детали"):
@@ -701,10 +716,6 @@ if uploaded_file:
                             if result.get('traceback'):
                                 with st.expander("📄 Full Traceback"):
                                     st.code(result['traceback'], language='python')
-                            
-                            # Диагностическая информация
-                            with st.expander("📊 Диагностика API"):
-                                st.json(result.get('api_diagnostics', {}))
                         else:
                             st.error(f"❌ Ошибка выполнения: {result.get('error')}")
                             if result.get('traceback'):
@@ -738,11 +749,6 @@ if uploaded_file:
                         
                         if result.get('explanation'):
                             st.info(f"💡 **Интерпретация:** {result['explanation']}")
-                        
-                        # Показ статистики использования API
-                        if result.get('api_usage'):
-                            with st.expander("📊 Статистика API"):
-                                st.json(result['api_usage'])
                 
                 except Exception as e:
                     st.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {str(e)}")
@@ -760,11 +766,7 @@ else:
     examples = [
         "Построй гистограмму распределения возраста",
         "Сравни среднюю зарплату по отделам",
-        "Найди корреляции между числовыми переменными"
+        "Найди корреляции между числовыми переменными",
+        "Покажи box plot для выявления выбросов",
+        "Визуализируй динамику продаж по месяцам"
     ]
-    for ex in examples:
-        st.markdown(f"• `{ex}`")
-
-# Футер
-st.markdown("---")
-st.caption("🤖 AI Analytics Agent Pro | Диагностика включена")
