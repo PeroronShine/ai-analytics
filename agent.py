@@ -25,7 +25,6 @@ class DataAnalysisAgent:
             'Accept': 'application/json'
         }
         
-        # Автоопределение формата API
         if self.is_genapi:
             url = self.base_url
             payload = {
@@ -52,11 +51,14 @@ class DataAnalysisAgent:
             data = resp.json()
             
             content = ""
+            
             if self.is_genapi:
                 if "response" in data and isinstance(data["response"], list) and data["response"]:
                     content = data["response"][0]
                 elif "output" in data:
                     content = data["output"] if isinstance(data["output"], str) else json.dumps(data["output"], ensure_ascii=False)
+                elif "choices" in data:
+                    content = data["choices"][0]["message"].get("content", "") if data["choices"] else ""
                 else:
                     content = str(data)
             else:
@@ -65,9 +67,14 @@ class DataAnalysisAgent:
                 else:
                     content = str(data)
             
+            if content is None:
+                content = ""
+            
             return {"content": content}
+        except requests.exceptions.RequestException as e:
+            return {"error": f"HTTP Error: {str(e)}"}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Unexpected error: {str(e)}"}
     
     def _get_system_prompt(self, dataset_schema: str) -> str:
         return f"""Ты — агент-аналитик данных. У тебя есть доступ к pandas DataFrame `df`.
@@ -113,12 +120,19 @@ class DataAnalysisAgent:
         lines.append(df.head(3).to_csv(index=False))
         return "\n".join(lines)
     
-    def _parse_response(self, text: str) -> Dict[str, Any]:
-        text = text.strip()
+    def _parse_response(self, text: Any) -> Dict[str, Any]:
+        if text is None:
+            return {"final_answer": "Пустой ответ от модели", "thought": "Нет ответа"}
+        
+        text = str(text).strip()
+        
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
             text = text.strip()
+        
+        if not text:
+            return {"final_answer": "Пустой ответ от модели", "thought": "Нет ответа"}
         
         try:
             return json.loads(text)
@@ -150,7 +164,7 @@ class DataAnalysisAgent:
             if "error" in llm_resp:
                 return {"error": llm_resp["error"], "steps": steps}
             
-            raw_content = llm_resp["content"]
+            raw_content = llm_resp.get("content", "")
             parsed = self._parse_response(raw_content)
             
             step = {
