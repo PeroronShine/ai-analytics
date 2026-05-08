@@ -1,23 +1,12 @@
-# Core
 streamlit>=1.32.0
 pandas>=2.0.0
 numpy>=1.24.0
-
-# GigaChat
 gigachat>=0.1.0
-
-# E2B Sandbox
 e2b-code-interpreter>=0.0.10
-
-# Visualization
 plotly>=5.18.0
 matplotlib>=3.8.0
 seaborn>=0.13.0
-
-# Data processing
-openpyxl>=3.1.0  # For Excel files
-xlrd>=2.0.0      # For .xls files
-
-# Utilities
+openpyxl>=3.1.0
+xlrd>=2.0.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
