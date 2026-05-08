@@ -8,3 +8,4 @@ xlsxwriter
 requests
 httpx
 pillow
+matplotlib
