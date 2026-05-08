@@ -503,7 +503,7 @@ def check_safety(query: str) -> tuple:
 
 
 # ================= UI =================
-st.set_page_config(page_title="🤖 AI Analytics Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI Analytics Pro", page_icon="🤖", layout="wide")
 
 st.markdown("""
 <style>
@@ -515,7 +515,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("AI Analytics Agent Pro")
-st.markdown("*Интеллектуальный анализ данных с детальной диагностикой*")
+st.markdown("*🤖 Интеллектуальный анализ данных с детальной диагностикой*")
 
 # Инициализация session state
 if 'analysis_history' not in st.session_state:
