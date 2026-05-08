@@ -282,7 +282,7 @@ def check_prompt_safety(query: str) -> tuple:
 
 # ================= STREAMLIT UI =================
 st.set_page_config(
-    page_title="🤖 AI Analytics Agent",
+    page_title="AI Analytics Agent",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -384,7 +384,7 @@ if uploaded_file is not None:
                 st.warning(safety_msg)
                 st.stop()
 
-            with st.spinner("🤖 Агент генерирует план анализа..."):
+            with st.spinner("Агент генерирует план анализа..."):
                 try:
                     agent = DeepSeekAnalyticsAgent(api_key=api_key, model=selected_model)
                     result = agent.run_analysis(user_query, df)
