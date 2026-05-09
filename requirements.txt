@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+openai
+plotly
+openpyxl
+xlsxwriter
+requests
+httpx
